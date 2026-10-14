@@ -64,29 +64,6 @@ interface Review {
     recommender_name: string | null;
 }
 
-interface ReviewEditRequest {
-    id: string;
-    restaurant_id: string;
-    requester_id: string | null;
-    requester_name: string;
-    reason: string;
-    proposed_changes: {
-        name?: string;
-        category?: string;
-        mustTry?: string;
-        mediaItems?: MediaItem[];
-    } | null;
-    status: 'pending' | 'approved' | 'rejected' | 'done';
-    admin_note: string | null;
-    reviewed_by: string | null;
-    reviewed_at: string | null;
-    created_at: string;
-    restaurant_name?: string;
-    restaurant_must_try?: string;
-    restaurant_category?: string;
-    restaurant_reviewer_name?: string;
-}
-
 interface AdminReviewRequest {
     id: string;
     restaurant_id: string;
@@ -534,7 +511,6 @@ export default function Home() {
 
     const closeCheckout = () => setCheckout(null);
 
-// ### ⬇️⬇️⬇️ วางส่วนที่ 2 ต่อจากตรงนี้ ⬇️⬇️⬇️
     // ==================== Checkout ====================
     const startCheckout = async (planId: string) => {
         setCreatingCheckout(true);
@@ -722,7 +698,7 @@ export default function Home() {
         }
     };
 
-    // ==================== GPS: ดึงตำแหน่ง ====================
+    // ==================== GPS ====================
     const getCurrentLocation = () => {
         if (!navigator.geolocation) {
             showToast('❌ เบราว์เซอร์ไม่รองรับ GPS');
@@ -780,26 +756,110 @@ export default function Home() {
         await refreshReviews();
     };
 
-    const handleEditReviewMedia = (
+    // ==================== Media Upload: ใช้ Vercel Blob ====================
+    const handleFilesUpload = async (
         e: React.ChangeEvent<HTMLInputElement>
     ) => {
         const files = e.target.files;
         if (!files || files.length === 0) return;
+
+        const remaining = MAX_MEDIA_ITEMS - newMedia.length;
+        if (remaining <= 0) {
+            showToast(`เพิ่มได้สูงสุด ${MAX_MEDIA_ITEMS} ไฟล์`);
+            return;
+        }
+
+        const toAdd = Array.from(files).slice(0, remaining);
+        setUploading(true);
+
+        try {
+            const newItems: MediaItem[] = [];
+
+            for (const file of toAdd) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(`❌ ${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
+                    continue;
+                }
+
+                const data = await res.json();
+                newItems.push({
+                    type: data.type,
+                    url: data.url,
+                });
+            }
+
+            setNewMedia((prev) => [...prev, ...newItems]);
+            showToast(`✓ อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
+        } catch (err) {
+            console.error(err);
+            showToast('❌ อัพโหลดไม่สำเร็จ');
+        } finally {
+            setUploading(false);
+            e.target.value = '';
+        }
+    };
+
+    const handleEditReviewMedia = async (
+        e: React.ChangeEvent<HTMLInputElement>
+    ) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+
         const remaining = MAX_MEDIA_ITEMS - editReviewForm.mediaItems.length;
         if (remaining <= 0) {
             showToast(`เพิ่มได้สูงสุด ${MAX_MEDIA_ITEMS} ไฟล์`);
             return;
         }
+
         const toAdd = Array.from(files).slice(0, remaining);
-        const newItems: MediaItem[] = toAdd.map((file) => ({
-            type: file.type.startsWith('video/') ? 'video' : 'image',
-            url: URL.createObjectURL(file),
-        }));
-        setEditReviewForm((f) => ({
-            ...f,
-            mediaItems: [...f.mediaItems, ...newItems],
-        }));
-        e.target.value = '';
+        setUploading(true);
+
+        try {
+            const newItems: MediaItem[] = [];
+
+            for (const file of toAdd) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(`❌ ${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
+                    continue;
+                }
+
+                const data = await res.json();
+                newItems.push({
+                    type: data.type,
+                    url: data.url,
+                });
+            }
+
+            setEditReviewForm((f) => ({
+                ...f,
+                mediaItems: [...f.mediaItems, ...newItems],
+            }));
+            showToast(`✓ อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
+        } catch (err) {
+            console.error(err);
+            showToast('❌ อัพโหลดไม่สำเร็จ');
+        } finally {
+            setUploading(false);
+            e.target.value = '';
+        }
     };
 
     const removeEditMedia = (index: number) => {
@@ -809,7 +869,65 @@ export default function Home() {
         }));
     };
 
-    // ==================== Review: ส่งคำขอให้ Admin ====================
+    const removeMedia = (index: number) => {
+        setNewMedia((prev) => prev.filter((_, i) => i !== index));
+    };
+
+    const moveMedia = (index: number, direction: -1 | 1) => {
+        setNewMedia((prev) => {
+            const next = [...prev];
+            const target = index + direction;
+            if (target < 0 || target >= next.length) return prev;
+            [next[index], next[target]] = [next[target], next[index]];
+            return next;
+        });
+    };
+
+    // ==================== Review: สร้างใหม่ ====================
+    const handleAddReview = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newName.trim() || !newMustTry.trim()) return;
+
+        const defaultImage =
+            'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
+
+        const mediaItems: MediaItem[] =
+            newMedia.length > 0
+                ? newMedia
+                : [{ type: 'image', url: defaultImage }];
+
+        const r = await api('/api/reviews', {
+            method: 'POST',
+            body: JSON.stringify({
+                name: newName,
+                category: newCategory,
+                mustTry: newMustTry,
+                mediaItems,
+                latitude: newLatitude,
+                longitude: newLongitude,
+                address: newAddress,
+                recommenderName: newRecommender,
+            }),
+        });
+
+        if (!r.ok) {
+            showToast('บันทึกรีวิวไม่สำเร็จ');
+            return;
+        }
+
+        showToast(`โพสต์รีวิวสำเร็จ! (${mediaItems.length} ไฟล์)`);
+        setNewName('');
+        setNewMustTry('');
+        setNewMedia([]);
+        setNewRecommender('');
+        setNewAddress('');
+        setNewLatitude(null);
+        setNewLongitude(null);
+        setShowAddForm(false);
+        await refreshReviews();
+    };
+
+    // ==================== Review: ส่งคำขอ ====================
     const openRequestModal = (r: Review) => {
         setShowRequestModal(r);
         setRequestReason('');
@@ -893,88 +1011,6 @@ export default function Home() {
         }
     };
 
-    // ==================== Media Upload (หลายไฟล์) ====================
-    const handleFilesUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = e.target.files;
-        if (!files || files.length === 0) return;
-
-        const remaining = MAX_MEDIA_ITEMS - newMedia.length;
-        if (remaining <= 0) {
-            showToast(`เพิ่มได้สูงสุด ${MAX_MEDIA_ITEMS} ไฟล์`);
-            return;
-        }
-
-        const toAdd = Array.from(files).slice(0, remaining);
-        setUploading(true);
-
-        const newItems: MediaItem[] = toAdd.map((file) => ({
-            type: file.type.startsWith('video/') ? 'video' : 'image',
-            url: URL.createObjectURL(file),
-        }));
-
-        setNewMedia((prev) => [...prev, ...newItems]);
-        setUploading(false);
-        e.target.value = '';
-    };
-
-    const removeMedia = (index: number) => {
-        setNewMedia((prev) => prev.filter((_, i) => i !== index));
-    };
-
-    const moveMedia = (index: number, direction: -1 | 1) => {
-        setNewMedia((prev) => {
-            const next = [...prev];
-            const target = index + direction;
-            if (target < 0 || target >= next.length) return prev;
-            [next[index], next[target]] = [next[target], next[index]];
-            return next;
-        });
-    };
-
-    // ==================== Review: สร้างใหม่ ====================
-    const handleAddReview = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!newName.trim() || !newMustTry.trim()) return;
-
-        const defaultImage =
-            'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
-
-        const mediaItems: MediaItem[] =
-            newMedia.length > 0
-                ? newMedia
-                : [{ type: 'image', url: defaultImage }];
-
-        const r = await api('/api/reviews', {
-            method: 'POST',
-            body: JSON.stringify({
-                name: newName,
-                category: newCategory,
-                mustTry: newMustTry,
-                mediaItems,
-                latitude: newLatitude,
-                longitude: newLongitude,
-                address: newAddress,
-                recommenderName: newRecommender,
-            }),
-        });
-
-        if (!r.ok) {
-            showToast('บันทึกรีวิวไม่สำเร็จ');
-            return;
-        }
-
-        showToast(`โพสต์รีวิวสำเร็จ! (${mediaItems.length} ไฟล์)`);
-        setNewName('');
-        setNewMustTry('');
-        setNewMedia([]);
-        setNewRecommender('');
-        setNewAddress('');
-        setNewLatitude(null);
-        setNewLongitude(null);
-        setShowAddForm(false);
-        await refreshReviews();
-    };
-
     // ==================== Filter Reviews ====================
     const categories = useMemo(() => {
         const set = new Set(reviews.map((r) => r.category));
@@ -996,9 +1032,7 @@ export default function Home() {
             return true;
         });
     }, [reviews, activeTab, searchQuery]);
-
-// ### ⬇️⬇️⬇️ วางส่วนที่ 3 ต่อจากตรงนี้ ⬇️⬇️⬇️
-    // ==================== Return JSX ====================
+        // ==================== Return JSX ====================
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6 space-y-6">
             {/* Toast */}
@@ -1257,11 +1291,6 @@ export default function Home() {
                                                 {fmtDate(c.starts_at)} –{' '}
                                                 {fmtDate(c.ends_at)}
                                             </div>
-                                            {c.restaurant_name && (
-                                                <div className="text-[10px] text-amber-400">
-                                                    ร้าน: {c.restaurant_name}
-                                                </div>
-                                            )}
                                         </td>
                                         <td className="py-2 px-3">
                                             <span
@@ -1304,8 +1333,7 @@ export default function Home() {
                                                                 }
                                                                 className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-2 py-1 rounded cursor-pointer text-[10px]"
                                                             >
-                                                                ✓
-                                                                บันทึกว่าชำระแล้ว
+                                                                ✓ บันทึกว่าชำระแล้ว
                                                             </button>
                                                         )}
                                                 </div>
@@ -1974,11 +2002,6 @@ export default function Home() {
                                     {sponsorship.sub_text}
                                 </p>
                             )}
-                            {sponsorship.restaurant_name && (
-                                <p className="text-[11px] text-amber-400">
-                                    ร้าน: {sponsorship.restaurant_name}
-                                </p>
-                            )}
                         </div>
                         <div className="flex flex-col gap-2 shrink-0">
                             <a
@@ -2077,7 +2100,6 @@ export default function Home() {
                         required
                     />
 
-                    {/* ผู้แนะนำ */}
                     <input
                         type="text"
                         placeholder="ผู้แนะนำ (เช่น สมชาย xxx)"
@@ -2087,7 +2109,6 @@ export default function Home() {
                         className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
                     />
 
-                    {/* ที่อยู่ */}
                     <input
                         type="text"
                         placeholder="ที่อยู่ร้าน (ไม่บังคับ)"
@@ -2097,7 +2118,6 @@ export default function Home() {
                         className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
                     />
 
-                    {/* GPS */}
                     <div className="flex gap-2">
                         <button
                             type="button"
@@ -2170,7 +2190,6 @@ export default function Home() {
                                                 type="button"
                                                 onClick={() => moveMedia(i, -1)}
                                                 className="bg-black/70 hover:bg-black text-white text-[10px] w-5 h-5 rounded flex items-center justify-center cursor-pointer"
-                                                title="เลื่อนซ้าย"
                                             >
                                                 ←
                                             </button>
@@ -2180,7 +2199,6 @@ export default function Home() {
                                                 type="button"
                                                 onClick={() => moveMedia(i, 1)}
                                                 className="bg-black/70 hover:bg-black text-white text-[10px] w-5 h-5 rounded flex items-center justify-center cursor-pointer"
-                                                title="เลื่อนขวา"
                                             >
                                                 →
                                             </button>
@@ -2189,7 +2207,6 @@ export default function Home() {
                                             type="button"
                                             onClick={() => removeMedia(i)}
                                             className="bg-rose-600/90 hover:bg-rose-600 text-white text-[10px] w-5 h-5 rounded flex items-center justify-center cursor-pointer"
-                                            title="ลบ"
                                         >
                                             ×
                                         </button>
@@ -2200,7 +2217,9 @@ export default function Home() {
                     )}
 
                     {uploading && (
-                        <p className="text-xs text-amber-300">กำลังโหลดไฟล์...</p>
+                        <p className="text-xs text-amber-300">
+                            ⏳ กำลังอัพโหลด...
+                        </p>
                     )}
 
                     <button
@@ -2259,6 +2278,12 @@ export default function Home() {
                                         <img
                                             src={cover.url}
                                             alt={res.name}
+                                            onError={(e) => {
+                                                (
+                                                    e.target as HTMLImageElement
+                                                ).src =
+                                                    'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
+                                            }}
                                             className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                                         />
                                     )}
@@ -2313,11 +2338,6 @@ export default function Home() {
                                                 )}
                                             </button>
                                         ))}
-                                        {items.length > 6 && (
-                                            <div className="w-10 h-10 shrink-0 rounded-md bg-black/70 text-white text-[10px] font-bold flex items-center justify-center">
-                                                +{items.length - 6}
-                                            </div>
-                                        )}
                                     </div>
                                 )}
                             </div>
@@ -2353,18 +2373,6 @@ export default function Home() {
                                     </strong>{' '}
                                     {res.must_try}
                                 </p>
-                                {Array.isArray(res.tags) && res.tags.length > 0 && (
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {res.tags.map((tag, i) => (
-                                            <span
-                                                key={i}
-                                                className="text-[11px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-md"
-                                            >
-                                                {tag}
-                                            </span>
-                                        ))}
-                                    </div>
-                                )}
 
                                 <button
                                     onClick={() => {
@@ -3029,21 +3037,10 @@ export default function Home() {
                         <div className="text-white text-sm font-bold">
                             {lightboxIndex.index + 1} /{' '}
                             {lightboxIndex.items.length}
-                            {lightboxIndex.items[lightboxIndex.index]
-                                ?.type === 'video' ? (
-                                <span className="ml-2 text-xs bg-rose-500 px-2 py-0.5 rounded">
-                                    🎬 วิดีโอ
-                                </span>
-                            ) : (
-                                <span className="ml-2 text-xs bg-sky-500 px-2 py-0.5 rounded">
-                                    📷 รูปภาพ
-                                </span>
-                            )}
                         </div>
                         <button
                             onClick={() => setLightboxIndex(null)}
                             className="text-white hover:bg-white/20 w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition"
-                            aria-label="ปิด"
                         >
                             ✕
                         </button>
@@ -3063,7 +3060,6 @@ export default function Home() {
                                     })
                                 }
                                 className="absolute left-4 top-1/2 -translate-y-1/2 bg-white/10 hover:bg-white/30 text-white w-12 h-12 rounded-full flex items-center justify-center cursor-pointer transition text-2xl"
-                                aria-label="ก่อนหน้า"
                             >
                                 ‹
                             </button>
@@ -3094,6 +3090,12 @@ export default function Home() {
                                         ].url
                                     }
                                     alt={`media-${lightboxIndex.index}`}
+                                    onError={(e) => {
+                                        (
+                                            e.target as HTMLImageElement
+                                        ).src =
+                                            'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
+                                    }}
                                     className="max-w-full max-h-[80vh] rounded-xl shadow-2xl object-contain"
                                 />
                             )}
@@ -3110,7 +3112,6 @@ export default function Home() {
                                     })
                                 }
                                 className="absolute right-4 top-1/2 -translate-y-1/2 bg-white/10 hover:bg-white/30 text-white w-12 h-12 rounded-full flex items-center justify-center cursor-pointer transition text-2xl"
-                                aria-label="ถัดไป"
                             >
                                 ›
                             </button>
