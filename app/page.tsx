@@ -150,7 +150,7 @@ interface AdminSummary {
 
 // ==================== Helpers ====================
 const baht = (satang: number) =>
-    `฿${(satang / 100).toLocaleString('th-TH', {
+    `\u0E3F${(satang / 100).toLocaleString('th-TH', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
@@ -202,7 +202,7 @@ function parseMediaItems(raw: MediaItem[] | string | null): MediaItem[] {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) return parsed;
         } catch {
-            /* ignore */
+            // ignore
         }
     }
     return [];
@@ -248,9 +248,9 @@ export default function Home() {
         pending: 0,
     });
 
-        // --- VIP ---
+    // --- VIP ---
     const [showVipModal, setShowVipModal] = useState(false);
-    const [mobileMenuOpen, setMobileMenuOpen] = useState(false);  ← ✅ อยู่แล้ว!
+    const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [checkout, setCheckout] = useState<Checkout | null>(null);
     const [checkoutState, setCheckoutState] = useState<
         'waiting' | 'succeeded' | 'failed'
@@ -298,7 +298,7 @@ export default function Home() {
         brandName: '',
         headline: '',
         subText: '',
-        ctaText: 'ดูโปรโมชัน →',
+        ctaText: 'ดูโปรโมชัน',
         targetUrl: 'https://',
         monthlyFeeBaht: '5000',
         startsAt: '',
@@ -315,9 +315,7 @@ export default function Home() {
     });
 
     // --- Request Edit Modal ---
-    const [showRequestModal, setShowRequestModal] = useState<Review | null>(
-        null
-    );
+    const [showRequestModal, setShowRequestModal] = useState<Review | null>(null);
     const [requestReason, setRequestReason] = useState('');
     const [requestProposed, setRequestProposed] = useState({
         name: '',
@@ -327,9 +325,7 @@ export default function Home() {
 
     // --- Admin: Review Requests ---
     const [showReviewRequests, setShowReviewRequests] = useState(false);
-    const [reviewRequests, setReviewRequests] = useState<AdminReviewRequest[]>(
-        []
-    );
+    const [reviewRequests, setReviewRequests] = useState<AdminReviewRequest[]>([]);
     const [reviewRequestCounts, setReviewRequestCounts] = useState({
         pending: 0,
         approved: 0,
@@ -347,7 +343,7 @@ export default function Home() {
         brandName: '',
         headline: '',
         subText: '',
-        ctaText: 'ดูโปรโมชัน →',
+        ctaText: 'ดูโปรโมชัน',
         targetUrl: 'https://',
         monthlyFeeBaht: '5000',
         startsAt: DEFAULT_START_DATE,
@@ -365,6 +361,7 @@ export default function Home() {
         setTimeout(() => setToast(null), 4000);
     }, []);
 
+// === วางส่วนที่ 2 ต่อจากตรงนี้ ===
     // ==================== Refresh Functions ====================
     const refreshMe = useCallback(async () => {
         const r = await api<MeResponse>('/api/me');
@@ -580,7 +577,7 @@ export default function Home() {
             method,
             body: body ? JSON.stringify(body) : undefined,
         });
-        if (!r.ok) showToast(`❌ ${r.data?.error ?? 'ดำเนินการไม่สำเร็จ'}`);
+        if (!r.ok) showToast(`${r.data?.error ?? 'ดำเนินการไม่สำเร็จ'}`);
         else await loadSummary();
         return r.ok;
     };
@@ -607,7 +604,7 @@ export default function Home() {
             brandName: c.brand_name,
             headline: c.headline,
             subText: c.sub_text ?? '',
-            ctaText: c.cta_text ?? 'ดูโปรโมชัน →',
+            ctaText: c.cta_text ?? 'ดูโปรโมชัน',
             targetUrl: c.target_url ?? 'https://',
             monthlyFeeBaht: String(Math.round(c.monthly_fee_satang / 100)),
             startsAt: c.starts_at.slice(0, 10),
@@ -655,7 +652,7 @@ export default function Home() {
         if (ok) showToast('คำนวณและสร้างรายการจ่ายรางวัลแล้ว');
     };
 
-    // ==================== Review: ลบ (Admin) ====================
+    // ==================== Review: Delete (Admin) ====================
     const handleDeleteReview = async (reviewId: string, name: string) => {
         const confirmed = window.confirm(
             `ต้องการลบรีวิว "${name}" ใช่หรือไม่?\n\nการลบไม่สามารถเรียกคืนได้`
@@ -666,17 +663,17 @@ export default function Home() {
             method: 'DELETE',
         });
         if (!r.ok) {
-            showToast(`❌ ${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
+            showToast(`${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
             return;
         }
-        showToast('✓ ลบรีวิวสำเร็จ');
+        showToast('ลบรีวิวสำเร็จ');
         await refreshReviews();
     };
 
-    // ==================== Review: แชร์ ====================
+    // ==================== Review: Share ====================
     const shareReview = async (review: Review) => {
         const url = `${window.location.origin}/#review-${review.id}`;
-        const text = `🍜 ${review.name}\n⭐ ${review.rating}\n📍 ${review.must_try}\n\nดูรีวิวเต็ม: `;
+        const text = `\u{1F35C} ${review.name}\n\u2B50 ${review.rating}\n\u{1F4CD} ${review.must_try}\n\nดูรีวิวเต็ม: `;
 
         if (navigator.share) {
             try {
@@ -685,16 +682,16 @@ export default function Home() {
                     text: text,
                     url: url,
                 });
-                showToast('✓ แชร์สำเร็จ');
+                showToast('แชร์สำเร็จ');
             } catch (err) {
-                /* user cancelled */
+                // user cancelled
             }
         } else {
             try {
                 await navigator.clipboard.writeText(text + url);
-                showToast('✓ คัดลอกลิงก์แล้ว');
+                showToast('คัดลอกลิงก์แล้ว');
             } catch {
-                showToast('❌ ไม่สามารถแชร์ได้');
+                showToast('ไม่สามารถแชร์ได้');
             }
         }
     };
@@ -702,7 +699,7 @@ export default function Home() {
     // ==================== GPS ====================
     const getCurrentLocation = () => {
         if (!navigator.geolocation) {
-            showToast('❌ เบราว์เซอร์ไม่รองรับ GPS');
+            showToast('เบราว์เซอร์ไม่รองรับ GPS');
             return;
         }
         setGettingLocation(true);
@@ -711,18 +708,18 @@ export default function Home() {
                 setNewLatitude(pos.coords.latitude);
                 setNewLongitude(pos.coords.longitude);
                 setGettingLocation(false);
-                showToast('✓ ได้ตำแหน่งแล้ว');
+                showToast('ได้ตำแหน่งแล้ว');
             },
             (err) => {
                 console.error(err);
-                showToast('❌ ไม่สามารถดึงตำแหน่งได้');
+                showToast('ไม่สามารถดึงตำแหน่งได้');
                 setGettingLocation(false);
             },
             { enableHighAccuracy: true, timeout: 10000 }
         );
     };
 
-    // ==================== Review: แก้ไข ====================
+    // ==================== Review: Edit ====================
     const openEditReview = (r: Review) => {
         setEditingReview(r);
         setEditReviewForm({
@@ -749,15 +746,36 @@ export default function Home() {
             }
         );
         if (!r.ok) {
-            showToast(`❌ ${r.data?.error ?? 'แก้ไขไม่สำเร็จ'}`);
+            showToast(`${r.data?.error ?? 'แก้ไขไม่สำเร็จ'}`);
             return;
         }
-        showToast('✓ แก้ไขรีวิวสำเร็จ');
+        showToast('แก้ไขรีวิวสำเร็จ');
         setEditingReview(null);
         await refreshReviews();
     };
 
-    // ==================== Media Upload: ใช้ Vercel Blob ====================
+    const removeEditMedia = (index: number) => {
+        setEditReviewForm((f) => ({
+            ...f,
+            mediaItems: f.mediaItems.filter((_, i) => i !== index),
+        }));
+    };
+
+    const removeMedia = (index: number) => {
+        setNewMedia((prev) => prev.filter((_, i) => i !== index));
+    };
+
+    const moveMedia = (index: number, direction: -1 | 1) => {
+        setNewMedia((prev) => {
+            const next = [...prev];
+            const target = index + direction;
+            if (target < 0 || target >= next.length) return prev;
+            [next[index], next[target]] = [next[target], next[index]];
+            return next;
+        });
+    };
+
+    // ==================== Upload: Vercel Blob ====================
     const handleFilesUpload = async (
         e: React.ChangeEvent<HTMLInputElement>
     ) => {
@@ -787,7 +805,7 @@ export default function Home() {
 
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
-                    showToast(`❌ ${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
+                    showToast(`${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
                     continue;
                 }
 
@@ -799,10 +817,10 @@ export default function Home() {
             }
 
             setNewMedia((prev) => [...prev, ...newItems]);
-            showToast(`✓ อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
+            showToast(`อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
         } catch (err) {
             console.error(err);
-            showToast('❌ อัพโหลดไม่สำเร็จ');
+            showToast('อัพโหลดไม่สำเร็จ');
         } finally {
             setUploading(false);
             e.target.value = '';
@@ -838,7 +856,7 @@ export default function Home() {
 
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
-                    showToast(`❌ ${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
+                    showToast(`${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
                     continue;
                 }
 
@@ -853,38 +871,17 @@ export default function Home() {
                 ...f,
                 mediaItems: [...f.mediaItems, ...newItems],
             }));
-            showToast(`✓ อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
+            showToast(`อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
         } catch (err) {
             console.error(err);
-            showToast('❌ อัพโหลดไม่สำเร็จ');
+            showToast('อัพโหลดไม่สำเร็จ');
         } finally {
             setUploading(false);
             e.target.value = '';
         }
     };
 
-    const removeEditMedia = (index: number) => {
-        setEditReviewForm((f) => ({
-            ...f,
-            mediaItems: f.mediaItems.filter((_, i) => i !== index),
-        }));
-    };
-
-    const removeMedia = (index: number) => {
-        setNewMedia((prev) => prev.filter((_, i) => i !== index));
-    };
-
-    const moveMedia = (index: number, direction: -1 | 1) => {
-        setNewMedia((prev) => {
-            const next = [...prev];
-            const target = index + direction;
-            if (target < 0 || target >= next.length) return prev;
-            [next[index], next[target]] = [next[target], next[index]];
-            return next;
-        });
-    };
-
-    // ==================== Review: สร้างใหม่ ====================
+    // ==================== Review: Create ====================
     const handleAddReview = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newName.trim() || !newMustTry.trim()) return;
@@ -928,7 +925,7 @@ export default function Home() {
         await refreshReviews();
     };
 
-    // ==================== Review: ส่งคำขอ ====================
+    // ==================== Request Edit ====================
     const openRequestModal = (r: Review) => {
         setShowRequestModal(r);
         setRequestReason('');
@@ -959,10 +956,10 @@ export default function Home() {
             }
         );
         if (!r.ok) {
-            showToast(`❌ ${r.data?.error ?? 'ส่งคำขอไม่สำเร็จ'}`);
+            showToast(`${r.data?.error ?? 'ส่งคำขอไม่สำเร็จ'}`);
             return;
         }
-        showToast('✓ ส่งคำขอให้แอดมินแล้ว');
+        showToast('ส่งคำขอให้แอดมินแล้ว');
         setShowRequestModal(null);
         setRequestReason('');
     };
@@ -1000,10 +997,10 @@ export default function Home() {
         if (ok) {
             showToast(
                 action === 'approve'
-                    ? '✓ อนุมัติและแก้ไขรีวิวแล้ว'
+                    ? 'อนุมัติและแก้ไขรีวิวแล้ว'
                     : action === 'reject'
-                    ? '✗ ปฏิเสธคำขอแล้ว'
-                    : '✓ ทำเครื่องหมายเสร็จสิ้น'
+                    ? 'ปฏิเสธคำขอแล้ว'
+                    : 'ทำเครื่องหมายเสร็จสิ้น'
             );
             setAdminNote('');
             setExpandedRequest(null);
@@ -1012,7 +1009,7 @@ export default function Home() {
         }
     };
 
-    // ==================== Filter Reviews ====================
+    // ==================== Filter ====================
     const categories = useMemo(() => {
         const set = new Set(reviews.map((r) => r.category));
         return ['ทั้งหมด', ...Array.from(set)];
@@ -1033,7 +1030,9 @@ export default function Home() {
             return true;
         });
     }, [reviews, activeTab, searchQuery]);
-        // ==================== Return JSX ====================
+
+// === วางส่วนที่ 3 ต่อจากตรงนี้ ===
+    // ==================== Return JSX ====================
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6 space-y-6">
             {/* Toast */}
@@ -1044,7 +1043,7 @@ export default function Home() {
             )}
 
             {/* Header */}
-                                  <header className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
+            <header className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
                 <div>
                     <div className="flex items-center gap-2.5">
                         <span className="text-2xl">🍜</span>
@@ -1060,7 +1059,7 @@ export default function Home() {
                     </p>
                 </div>
 
-                {/* 🖥️ Desktop — แสดงทุกอย่าง */}
+                {/* Desktop Menu */}
                 <div className="hidden md:flex flex-wrap items-center gap-2.5 justify-end">
                     {membership.isVip ? (
                         <span className="inline-block text-xs font-black px-3 py-1 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 shadow">
@@ -1100,7 +1099,7 @@ export default function Home() {
                     )}
                 </div>
 
-                {/* 📱 Mobile — ปุ่ม Hamburger */}
+                {/* Mobile Hamburger */}
                 <button
                     onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
                     className="md:hidden absolute top-4 right-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white w-11 h-11 rounded-xl flex items-center justify-center cursor-pointer shadow-lg z-10"
@@ -1110,7 +1109,7 @@ export default function Home() {
                 </button>
             </header>
 
-            {/* 📱 Mobile Menu Drawer */}
+            {/* Mobile Menu Drawer */}
             {mobileMenuOpen && (
                 <div
                     className="md:hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-40"
@@ -1167,84 +1166,6 @@ export default function Home() {
 
                         <hr className="border-slate-800" />
 
-                        <button
-                            onClick={() => {
-                                if (isAdmin) {
-                                    handleAdminLogout();
-                                } else {
-                                    setShowLogin(true);
-                                }
-                                setMobileMenuOpen(false);
-                            }}
-                            className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
-                        >
-                            {isAdmin ? '🚪 ออกจากแอดมิน' : '🔒 Admin Login'}
-                        </button>
-                    </div>
-                </div>
-            )}
-
-            {/* 📱 Mobile Menu Drawer */}
-            {mobileMenuOpen && (
-                <div
-                    className="md:hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-40"
-                    onClick={() => setMobileMenuOpen(false)}
-                >
-                    <div
-                        className="absolute top-0 right-0 w-72 h-full bg-slate-900 border-l border-slate-800 p-5 space-y-3 shadow-2xl overflow-y-auto"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex justify-between items-center pb-3 border-b border-slate-800">
-                            <h3 className="text-sm font-bold text-white">
-                                เมนู
-                            </h3>
-                            <button
-                                onClick={() => setMobileMenuOpen(false)}
-                                className="text-slate-400 hover:text-white cursor-pointer text-lg"
-                            >
-                                ✕
-                            </button>
-                        </div>
-
-                        {/* สถานะสมาชิก */}
-                        <div className="py-2">
-                            {membership.isVip ? (
-                                <span className="block text-xs font-black px-3 py-2 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 text-center">
-                                    สมาชิก VIP • ถึง{' '}
-                                    {fmtDate(membership.periodEnd)}
-                                </span>
-                            ) : (
-                                <span className="block text-xs font-bold px-3 py-2 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-center">
-                                    ผู้ใช้ฟรี (เห็นสปอนเซอร์)
-                                </span>
-                            )}
-                        </div>
-
-                        {/* ปุ่มสมัคร VIP */}
-                        <button
-                            onClick={() => {
-                                setShowVipModal(true);
-                                setMobileMenuOpen(false);
-                            }}
-                            className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-bold py-3 rounded-xl text-sm cursor-pointer"
-                        >
-                            {membership.isVip ? 'ต่ออายุ VIP' : '⭐ สมัคร VIP'}
-                        </button>
-
-                        {/* ปุ่มเขียนรีวิว */}
-                        <button
-                            onClick={() => {
-                                setShowAddForm(true);
-                                setMobileMenuOpen(false);
-                            }}
-                            className="w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
-                        >
-                            + เขียนรีวิวใหม่
-                        </button>
-
-                        <hr className="border-slate-800" />
-
-                        {/* Admin */}
                         <button
                             onClick={() => {
                                 if (isAdmin) {
@@ -1303,12 +1224,107 @@ export default function Home() {
                 )}
 
             {/* Admin Console */}
-                        {isAdmin && (
-                <section className="hidden md:block bg-rose-950/30 border-2 border-rose-500/50 rounded-2xl p-4 space-y-3 shadow-xl"></section>
+            {isAdmin && (
+                <section className="hidden md:block bg-rose-950/30 border-2 border-rose-500/50 rounded-2xl p-4 space-y-3 shadow-xl">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                        <span className="text-xs font-black uppercase text-rose-400">
+                            Admin Console
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                onClick={() =>
+                                    setShowSponsorManager(!showSponsorManager)
+                                }
+                                className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
+                            >
+                                {showSponsorManager ? 'ปิด' : 'จัดการสปอนเซอร์'}
+                            </button>
+                            <button
+                                onClick={() =>
+                                    setShowPayoutManager(!showPayoutManager)
+                                }
+                                className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
+                            >
+                                {showPayoutManager ? 'ปิด' : 'จ่ายรางวัล'}
+                            </button>
+                            <button
+                                onClick={() => setShowLogs(!showLogs)}
+                                className="bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 font-bold text-xs px-3.5 py-2 rounded-xl cursor-pointer"
+                            >
+                                Audit Logs
+                            </button>
+                            <button
+                                onClick={() =>
+                                    setShowReviewRequests(!showReviewRequests)
+                                }
+                                className="bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/40 text-violet-200 font-bold text-xs px-3.5 py-2 rounded-xl cursor-pointer relative"
+                            >
+                                📝 คำขอแก้ไข
+                                {reviewRequestCounts.pending > 0 && (
+                                    <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center">
+                                        {reviewRequestCounts.pending}
+                                    </span>
+                                )}
+                            </button>
+                            <button
+                                onClick={loadSummary}
+                                className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs px-3.5 py-2 rounded-xl cursor-pointer"
+                            >
+                                รีเฟรช
+                            </button>
+                        </div>
+                    </div>
+                    {summary ? (
+                        <>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <div className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl">
+                                    <span className="text-[10px] text-indigo-300 block">
+                                        รายได้ VIP
+                                    </span>
+                                    <span className="text-base font-black text-indigo-400">
+                                        {baht(summary.revenue.subscriptionsSatang)}
+                                    </span>
+                                </div>
+                                <div className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl">
+                                    <span className="text-[10px] text-indigo-300 block">
+                                        รายได้สปอนเซอร์
+                                    </span>
+                                    <span className="text-base font-black text-indigo-400">
+                                        {baht(summary.revenue.sponsorshipInvoicesSatang)}
+                                    </span>
+                                </div>
+                                <div className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl">
+                                    <span className="text-[10px] text-indigo-300 block">
+                                        รายได้รวม
+                                    </span>
+                                    <span className="text-base font-black text-indigo-400">
+                                        {baht(summary.revenue.totalSatang)}
+                                    </span>
+                                </div>
+                                <div className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl">
+                                    <span className="text-[10px] text-indigo-300 block">
+                                        จ่ายรางวัลแล้ว
+                                    </span>
+                                    <span className="text-base font-black text-indigo-400">
+                                        {baht(summary.revenue.payoutsPaidSatang)}
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="text-xs text-slate-400">
+                                สมาชิก VIP ที่ใช้งานอยู่: {summary.activeSubscribers} คน
+                            </div>
+                        </>
+                    ) : (
+                        <p className="text-xs text-slate-400">
+                            กำลังโหลดข้อมูล...
+                        </p>
+                    )}
+                </section>
+            )}
 
             {/* Sponsor Manager */}
             {isAdmin && showSponsorManager && summary && (
-                <section className="bg-slate-900 border-2 border-amber-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
+                <section className="hidden md:block bg-slate-900 border-2 border-amber-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
                     <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                         <h2 className="text-sm font-bold text-white">
                             จัดการสปอนเซอร์
@@ -1359,8 +1375,7 @@ export default function Home() {
                                         <td className="py-2 px-3">
                                             <span
                                                 className={`px-2 py-0.5 rounded text-[10px] ${
-                                                    SPONSOR_STATUS[c.status]
-                                                        ?.cls ?? ''
+                                                    SPONSOR_STATUS[c.status]?.cls ?? ''
                                                 }`}
                                             >
                                                 {SPONSOR_STATUS[c.status]?.label ??
@@ -1374,19 +1389,11 @@ export default function Home() {
                                             {c.invoice_status ? (
                                                 <div className="space-y-1">
                                                     <div>
-                                                        {baht(
-                                                            c.invoice_amount ?? 0
-                                                        )}{' '}
-                                                        •{' '}
-                                                        {
-                                                            INVOICE_STATUS[
-                                                                c.invoice_status
-                                                            ]
-                                                        }
+                                                        {baht(c.invoice_amount ?? 0)} •{' '}
+                                                        {INVOICE_STATUS[c.invoice_status]}
                                                     </div>
                                                     {c.invoice_id &&
-                                                        (c.invoice_status ===
-                                                            'issued' ||
+                                                        (c.invoice_status === 'issued' ||
                                                             c.invoice_status ===
                                                                 'overdue') && (
                                                             <button
@@ -1397,7 +1404,7 @@ export default function Home() {
                                                                 }
                                                                 className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-2 py-1 rounded cursor-pointer text-[10px]"
                                                             >
-                                                                ✓ บันทึกว่าชำระแล้ว
+                                                                บันทึกว่าชำระแล้ว
                                                             </button>
                                                         )}
                                                 </div>
@@ -1413,7 +1420,7 @@ export default function Home() {
                                                     }
                                                     className="bg-sky-500/20 text-sky-300 text-[10px] font-bold px-2 py-1 rounded cursor-pointer"
                                                 >
-                                                    ✏️ แก้ไข
+                                                    แก้ไข
                                                 </button>
                                                 {c.status === 'active' && (
                                                     <button
@@ -1421,9 +1428,7 @@ export default function Home() {
                                                             adminAction(
                                                                 `/api/admin/sponsorships/${c.id}`,
                                                                 'PATCH',
-                                                                {
-                                                                    status: 'paused',
-                                                                }
+                                                                { status: 'paused' }
                                                             )
                                                         }
                                                         className="bg-amber-500/20 text-amber-300 text-[10px] font-bold px-2 py-1 rounded cursor-pointer"
@@ -1438,9 +1443,7 @@ export default function Home() {
                                                             adminAction(
                                                                 `/api/admin/sponsorships/${c.id}`,
                                                                 'PATCH',
-                                                                {
-                                                                    status: 'active',
-                                                                }
+                                                                { status: 'active' }
                                                             )
                                                         }
                                                         className="bg-emerald-500/20 text-emerald-300 text-[10px] font-bold px-2 py-1 rounded cursor-pointer"
@@ -1454,9 +1457,7 @@ export default function Home() {
                                                             adminAction(
                                                                 `/api/admin/sponsorships/${c.id}`,
                                                                 'PATCH',
-                                                                {
-                                                                    status: 'expired',
-                                                                }
+                                                                { status: 'expired' }
                                                             )
                                                         }
                                                         className="bg-rose-500/20 text-rose-300 text-[10px] font-bold px-2 py-1 rounded cursor-pointer"
@@ -1485,10 +1486,7 @@ export default function Home() {
                                 placeholder="ชื่อแบรนด์/ร้านอาหาร"
                                 value={form.brandName}
                                 onChange={(e) =>
-                                    setForm({
-                                        ...form,
-                                        brandName: e.target.value,
-                                    })
+                                    setForm({ ...form, brandName: e.target.value })
                                 }
                                 required
                             />
@@ -1511,10 +1509,7 @@ export default function Home() {
                                 placeholder="ข้อความโปรโมชันหลัก"
                                 value={form.headline}
                                 onChange={(e) =>
-                                    setForm({
-                                        ...form,
-                                        headline: e.target.value,
-                                    })
+                                    setForm({ ...form, headline: e.target.value })
                                 }
                                 required
                             />
@@ -1523,10 +1518,7 @@ export default function Home() {
                                 placeholder="ข้อความรอง (ไม่บังคับ)"
                                 value={form.subText}
                                 onChange={(e) =>
-                                    setForm({
-                                        ...form,
-                                        subText: e.target.value,
-                                    })
+                                    setForm({ ...form, subText: e.target.value })
                                 }
                             />
                             <input
@@ -1534,10 +1526,7 @@ export default function Home() {
                                 placeholder="ข้อความปุ่ม"
                                 value={form.ctaText}
                                 onChange={(e) =>
-                                    setForm({
-                                        ...form,
-                                        ctaText: e.target.value,
-                                    })
+                                    setForm({ ...form, ctaText: e.target.value })
                                 }
                             />
                             <input
@@ -1546,10 +1535,7 @@ export default function Home() {
                                 placeholder="ลิงก์ปลายทาง https://..."
                                 value={form.targetUrl}
                                 onChange={(e) =>
-                                    setForm({
-                                        ...form,
-                                        targetUrl: e.target.value,
-                                    })
+                                    setForm({ ...form, targetUrl: e.target.value })
                                 }
                                 required
                             />
@@ -1575,10 +1561,7 @@ export default function Home() {
                                     type="date"
                                     value={form.endsAt}
                                     onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            endsAt: e.target.value,
-                                        })
+                                        setForm({ ...form, endsAt: e.target.value })
                                     }
                                     required
                                 />
@@ -1596,7 +1579,7 @@ export default function Home() {
 
             {/* Payout Manager */}
             {isAdmin && showPayoutManager && summary && (
-                <section className="bg-slate-900 border-2 border-emerald-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
+                <section className="hidden md:block bg-slate-900 border-2 border-emerald-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
                     <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                         <h2 className="text-sm font-bold text-white">
                             จ่ายรางวัลตามยอดวิว (Revenue Pool)
@@ -1720,7 +1703,7 @@ export default function Home() {
 
             {/* Audit Logs */}
             {isAdmin && showLogs && summary && (
-                <section className="bg-slate-900 border border-rose-500/40 rounded-2xl p-5 space-y-3 shadow-2xl">
+                <section className="hidden md:block bg-slate-900 border border-rose-500/40 rounded-2xl p-5 space-y-3 shadow-2xl">
                     <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                         <h2 className="text-sm font-bold text-white">
                             Audit Logs (50 รายการล่าสุด)
@@ -1772,7 +1755,7 @@ export default function Home() {
 
             {/* Review Requests Panel */}
             {isAdmin && showReviewRequests && (
-                <section className="bg-slate-900 border-2 border-violet-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
+                <section className="hidden md:block bg-slate-900 border-2 border-violet-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
                     <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                         <div>
                             <h2 className="text-sm font-bold text-white">
@@ -1791,38 +1774,32 @@ export default function Home() {
                     </div>
 
                     <div className="flex flex-wrap gap-1.5">
-                        {(
-                            [
-                                'pending',
-                                'approved',
-                                'rejected',
-                                'done',
-                                'all',
-                            ] as const
-                        ).map((s) => (
-                            <button
-                                key={s}
-                                onClick={() => {
-                                    setReviewRequestsFilter(s);
-                                    loadReviewRequests(s);
-                                }}
-                                className={`text-[11px] px-3 py-1.5 rounded-lg cursor-pointer transition ${
-                                    reviewRequestsFilter === s
-                                        ? 'bg-violet-500 text-white font-bold'
-                                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                                }`}
-                            >
-                                {s === 'pending'
-                                    ? `รอตรวจสอบ (${reviewRequestCounts.pending})`
-                                    : s === 'approved'
-                                    ? `อนุมัติแล้ว (${reviewRequestCounts.approved})`
-                                    : s === 'rejected'
-                                    ? `ปฏิเสธ (${reviewRequestCounts.rejected})`
-                                    : s === 'done'
-                                    ? `เสร็จสิ้น (${reviewRequestCounts.done})`
-                                    : 'ทั้งหมด'}
-                            </button>
-                        ))}
+                        {(['pending', 'approved', 'rejected', 'done', 'all'] as const).map(
+                            (s) => (
+                                <button
+                                    key={s}
+                                    onClick={() => {
+                                        setReviewRequestsFilter(s);
+                                        loadReviewRequests(s);
+                                    }}
+                                    className={`text-[11px] px-3 py-1.5 rounded-lg cursor-pointer transition ${
+                                        reviewRequestsFilter === s
+                                            ? 'bg-violet-500 text-white font-bold'
+                                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                                    }`}
+                                >
+                                    {s === 'pending'
+                                        ? `รอตรวจสอบ (${reviewRequestCounts.pending})`
+                                        : s === 'approved'
+                                        ? `อนุมัติแล้ว (${reviewRequestCounts.approved})`
+                                        : s === 'rejected'
+                                        ? `ปฏิเสธ (${reviewRequestCounts.rejected})`
+                                        : s === 'done'
+                                        ? `เสร็จสิ้น (${reviewRequestCounts.done})`
+                                        : 'ทั้งหมด'}
+                                </button>
+                            )
+                        )}
                     </div>
 
                     {reviewRequests.length === 0 ? (
@@ -1854,8 +1831,7 @@ export default function Home() {
                                                     </span>
                                                     <span
                                                         className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                                                            r.status ===
-                                                            'pending'
+                                                            r.status === 'pending'
                                                                 ? 'bg-amber-500/20 text-amber-300'
                                                                 : r.status ===
                                                                   'approved'
@@ -1918,71 +1894,12 @@ export default function Home() {
                                                 </div>
                                             </div>
 
-                                            {r.proposed_changes &&
-                                                Object.keys(r.proposed_changes)
-                                                    .length > 0 && (
-                                                    <div className="bg-sky-950/40 border border-sky-500/30 rounded-lg p-3 space-y-1">
-                                                        <div className="text-[10px] font-bold text-sky-300 uppercase">
-                                                            สิ่งที่ผู้ใช้เสนอแก้
-                                                        </div>
-                                                        <div className="text-xs text-sky-100 space-y-0.5">
-                                                            {typeof r
-                                                                .proposed_changes
-                                                                .name ===
-                                                                'string' && (
-                                                                <div>
-                                                                    <strong>
-                                                                        ชื่อใหม่:
-                                                                    </strong>{' '}
-                                                                    {
-                                                                        r
-                                                                            .proposed_changes
-                                                                            .name
-                                                                    }
-                                                                </div>
-                                                            )}
-                                                            {typeof r
-                                                                .proposed_changes
-                                                                .category ===
-                                                                'string' && (
-                                                                <div>
-                                                                    <strong>
-                                                                        หมวดใหม่:
-                                                                    </strong>{' '}
-                                                                    {
-                                                                        r
-                                                                            .proposed_changes
-                                                                            .category
-                                                                    }
-                                                                </div>
-                                                            )}
-                                                            {typeof r
-                                                                .proposed_changes
-                                                                .mustTry ===
-                                                                'string' && (
-                                                                <div>
-                                                                    <strong>
-                                                                        เมนูใหม่:
-                                                                    </strong>{' '}
-                                                                    {
-                                                                        r
-                                                                            .proposed_changes
-                                                                            .mustTry
-                                                                    }
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                )}
-
                                             {r.status === 'pending' && (
                                                 <textarea
                                                     placeholder="หมายเหตุสำหรับผู้ใช้ (ไม่บังคับ)"
                                                     value={adminNote}
                                                     onChange={(e) =>
-                                                        setAdminNote(
-                                                            e.target.value
-                                                        )
+                                                        setAdminNote(e.target.value)
                                                     }
                                                     rows={2}
                                                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white resize-none"
@@ -2010,7 +1927,7 @@ export default function Home() {
                                                         }
                                                         className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs px-3 py-2 rounded-lg cursor-pointer"
                                                     >
-                                                        ✓ อนุมัติและแก้ไข
+                                                        อนุมัติและแก้ไข
                                                     </button>
                                                     <button
                                                         onClick={() =>
@@ -2021,7 +1938,7 @@ export default function Home() {
                                                         }
                                                         className="bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs px-3 py-2 rounded-lg cursor-pointer"
                                                     >
-                                                        ✗ ปฏิเสธ
+                                                        ปฏิเสธ
                                                     </button>
                                                     <button
                                                         onClick={() =>
@@ -2032,7 +1949,7 @@ export default function Home() {
                                                         }
                                                         className="bg-slate-700 hover:bg-slate-600 text-white font-bold text-xs px-3 py-2 rounded-lg cursor-pointer"
                                                     >
-                                                        ✓ ทำเครื่องหมายเสร็จ
+                                                        ทำเครื่องหมายเสร็จ
                                                     </button>
                                                 </div>
                                             )}
@@ -2045,7 +1962,7 @@ export default function Home() {
                 </section>
             )}
 
-                        {/* Sponsorship Banner */}
+            {/* Sponsorship Banner */}
             {sponsorship && !membership.isVip && (
                 <section className="bg-gradient-to-r from-amber-950/70 via-slate-900 to-orange-950/60 border-2 border-amber-500/50 rounded-2xl p-4 md:p-5 shadow-xl">
                     <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 md:gap-4">
@@ -2066,14 +1983,9 @@ export default function Home() {
                                     {sponsorship.sub_text}
                                 </p>
                             )}
-                            {sponsorship.restaurant_name && (
-                                <p className="text-[11px] text-amber-400">
-                                    ร้าน: {sponsorship.restaurant_name}
-                                </p>
-                            )}
                         </div>
 
-                        {/* 🖥️ Desktop — แสดงปุ่ม */}
+                        {/* Desktop Buttons */}
                         <div className="hidden md:flex flex-col gap-2 shrink-0">
                             <a
                                 href={sponsorship.target_url}
@@ -2091,7 +2003,7 @@ export default function Home() {
                             </button>
                         </div>
 
-                        {/* 📱 Mobile — แสดงปุ่มขนาดเล็ก */}
+                        {/* Mobile Buttons */}
                         <div className="flex md:hidden w-full gap-2 pt-1">
                             <a
                                 href={sponsorship.target_url}
@@ -2110,7 +2022,7 @@ export default function Home() {
                         </div>
                     </div>
                 </section>
-            )}ฌ
+            )}
 
             {/* Reviews Header */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-2xl">
@@ -2215,12 +2127,12 @@ export default function Home() {
                             className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-2 rounded-lg text-xs cursor-pointer"
                         >
                             {gettingLocation
-                                ? '⏳ กำลังดึงตำแหน่ง...'
+                                ? 'กำลังดึงตำแหน่ง...'
                                 : '📍 ใช้ตำแหน่งปัจจุบัน'}
                         </button>
                         {newLatitude && newLongitude && (
                             <span className="flex items-center gap-1 text-[10px] text-emerald-300 bg-emerald-950/40 px-3 rounded-lg">
-                                ✓ {newLatitude.toFixed(4)},{' '}
+                                {newLatitude.toFixed(4)},{' '}
                                 {newLongitude.toFixed(4)}
                             </span>
                         )}
@@ -2259,7 +2171,6 @@ export default function Home() {
                                                 className="w-full h-full object-cover"
                                             />
                                         ) : (
-                                            // eslint-disable-next-line @next/next/no-img-element
                                             <img
                                                 src={m.url}
                                                 alt={`media-${i}`}
@@ -2269,7 +2180,6 @@ export default function Home() {
                                     </div>
                                     <div className="absolute top-1 left-1">
                                         <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-black/70 text-white">
-                                            {m.type === 'video' ? '🎬' : '📷'}{' '}
                                             {i + 1}
                                         </span>
                                     </div>
@@ -2307,7 +2217,7 @@ export default function Home() {
 
                     {uploading && (
                         <p className="text-xs text-amber-300">
-                            ⏳ กำลังอัพโหลด...
+                            กำลังอัพโหลด...
                         </p>
                     )}
 
@@ -2316,7 +2226,7 @@ export default function Home() {
                         disabled={uploading}
                         className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-2.5 rounded-xl transition cursor-pointer"
                     >
-                        ✓ โพสต์รีวิว
+                        โพสต์รีวิว
                     </button>
                 </form>
             )}
@@ -2363,16 +2273,9 @@ export default function Home() {
                                             className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                                         />
                                     ) : (
-                                        // eslint-disable-next-line @next/next/no-img-element
                                         <img
                                             src={cover.url}
                                             alt={res.name}
-                                            onError={(e) => {
-                                                (
-                                                    e.target as HTMLImageElement
-                                                ).src =
-                                                    'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
-                                            }}
                                             className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                                         />
                                     )}
@@ -2381,54 +2284,20 @@ export default function Home() {
                                 <div className="absolute top-3 left-3 flex gap-1.5">
                                     <span className="text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md bg-black/65 text-white border border-white/15">
                                         {cover.type === 'video'
-                                            ? '🎬 วิดีโอ'
-                                            : '📷 รูปภาพ'}
+                                            ? 'วิดีโอ'
+                                            : 'รูปภาพ'}
                                     </span>
                                     {items.length > 1 && (
                                         <span className="text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md bg-sky-500/90 text-white">
-                                            📚 {items.length} ไฟล์
+                                            {items.length} ไฟล์
                                         </span>
                                     )}
                                 </div>
                                 <div className="absolute top-3 right-3">
                                     <span className="text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md bg-amber-500/90 text-slate-950">
-                                        👁 {res.view_count.toLocaleString()} วิว
+                                        {res.view_count.toLocaleString()} วิว
                                     </span>
                                 </div>
-
-                                {items.length > 1 && (
-                                    <div className="absolute bottom-2 left-2 right-2 flex gap-1 overflow-x-auto pb-1">
-                                        {items.slice(0, 6).map((m, i) => (
-                                            <button
-                                                key={i}
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    trackView(res.id);
-                                                    setLightboxIndex({
-                                                        items,
-                                                        index: i,
-                                                    });
-                                                }}
-                                                className="w-10 h-10 shrink-0 rounded-md overflow-hidden border-2 border-white/30 hover:border-amber-400 transition cursor-pointer"
-                                            >
-                                                {m.type === 'video' ? (
-                                                    <video
-                                                        src={m.url}
-                                                        muted
-                                                        className="w-full h-full object-cover"
-                                                    />
-                                                ) : (
-                                                    // eslint-disable-next-line @next/next/no-img-element
-                                                    <img
-                                                        src={m.url}
-                                                        alt=""
-                                                        className="w-full h-full object-cover"
-                                                    />
-                                                )}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
                             </div>
 
                             <div className="p-4 space-y-3">
@@ -2442,8 +2311,7 @@ export default function Home() {
                                         </p>
                                         {res.recommender_name && (
                                             <p className="text-[11px] text-amber-300 mt-0.5">
-                                                👤 แนะนำโดย:{' '}
-                                                {res.recommender_name}
+                                                แนะนำโดย: {res.recommender_name}
                                             </p>
                                         )}
                                         {res.address && (
@@ -2453,7 +2321,7 @@ export default function Home() {
                                         )}
                                     </div>
                                     <span className="bg-amber-500/20 text-amber-400 font-black text-sm px-2.5 py-1 rounded-lg border border-amber-500/30 shrink-0">
-                                        ★ {Number(res.rating).toFixed(1)}
+                                        {Number(res.rating).toFixed(1)}
                                     </span>
                                 </div>
                                 <p className="text-xs text-slate-300 bg-slate-950/60 p-3 rounded-xl border border-slate-800/80">
@@ -2475,7 +2343,7 @@ export default function Home() {
                                     }}
                                     className="w-full text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded-lg cursor-pointer transition"
                                 >
-                                    👁 เปิดดู ({items.length} ไฟล์ • นับวิว)
+                                    เปิดดู ({items.length} ไฟล์ • นับวิว)
                                 </button>
 
                                 <div className="flex gap-1.5 flex-wrap">
@@ -2486,7 +2354,7 @@ export default function Home() {
                                         }}
                                         className="flex-1 text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 py-2 rounded-lg cursor-pointer transition"
                                     >
-                                        ✏️ แก้ไข
+                                        แก้ไข
                                     </button>
                                     <button
                                         onClick={(e) => {
@@ -2495,7 +2363,7 @@ export default function Home() {
                                         }}
                                         className="flex-1 text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 py-2 rounded-lg cursor-pointer transition"
                                     >
-                                        📨 ส่งคำขอ
+                                        ส่งคำขอ
                                     </button>
                                     <button
                                         onClick={(e) => {
@@ -2505,7 +2373,7 @@ export default function Home() {
                                         className="text-[11px] bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
                                         title="แชร์รีวิว"
                                     >
-                                        🔗
+                                        แชร์
                                     </button>
                                     {res.latitude && res.longitude && (
                                         <a
@@ -2516,7 +2384,7 @@ export default function Home() {
                                             className="text-[11px] bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
                                             title="ดูพิกัดร้าน"
                                         >
-                                            📍
+                                            แผนที่
                                         </a>
                                     )}
                                     {isAdmin && (
@@ -2531,7 +2399,7 @@ export default function Home() {
                                             className="text-[11px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
                                             title="ลบรีวิว (Admin)"
                                         >
-                                            🗑️
+                                            ลบ
                                         </button>
                                     )}
                                 </div>
@@ -2591,7 +2459,7 @@ export default function Home() {
                     >
                         <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                             <h3 className="text-lg font-bold text-white">
-                                ✏️ แก้ไขรีวิว
+                                แก้ไขรีวิว
                             </h3>
                             <button
                                 type="button"
@@ -2683,7 +2551,6 @@ export default function Home() {
                                                     className="w-full h-full object-cover"
                                                 />
                                             ) : (
-                                                // eslint-disable-next-line @next/next/no-img-element
                                                 <img
                                                     src={m.url}
                                                     alt=""
@@ -2708,7 +2575,7 @@ export default function Home() {
                                 type="submit"
                                 className="flex-1 bg-sky-500 hover:bg-sky-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer"
                             >
-                                💾 บันทึกการแก้ไข
+                                บันทึกการแก้ไข
                             </button>
                             <button
                                 type="button"
@@ -2732,7 +2599,7 @@ export default function Home() {
                         <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                             <div>
                                 <h3 className="text-lg font-bold text-white">
-                                    📨 ส่งคำขอให้แอดมินแก้ไข
+                                    ส่งคำขอให้แอดมินแก้ไข
                                 </h3>
                                 <p className="text-[11px] text-slate-400 mt-0.5">
                                     รีวิว: {showRequestModal.name}
@@ -2752,7 +2619,7 @@ export default function Home() {
                                 เหตุผลที่ขอแก้ไข *
                             </label>
                             <textarea
-                                placeholder="เช่น ข้อมูลเมนูผิด, ต้องการเพิ่มรูป, ลบข้อมูลที่ไม่เหมาะสม ฯลฯ"
+                                placeholder="เช่น ข้อมูลเมนูผิด, ต้องการเพิ่มรูป"
                                 value={requestReason}
                                 onChange={(e) =>
                                     setRequestReason(e.target.value)
@@ -2811,7 +2678,7 @@ export default function Home() {
                                 type="submit"
                                 className="flex-1 bg-violet-500 hover:bg-violet-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer"
                             >
-                                📨 ส่งคำขอ
+                                ส่งคำขอ
                             </button>
                             <button
                                 type="button"
@@ -2834,7 +2701,7 @@ export default function Home() {
                     >
                         <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                             <h3 className="text-lg font-bold text-white">
-                                ✏️ แก้ไขสปอนเซอร์
+                                แก้ไขสปอนเซอร์
                             </h3>
                             <button
                                 type="button"
@@ -2956,7 +2823,7 @@ export default function Home() {
                                 type="submit"
                                 className="flex-1 bg-sky-500 hover:bg-sky-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer"
                             >
-                                💾 บันทึกการแก้ไข
+                                บันทึกการแก้ไข
                             </button>
                             <button
                                 type="button"
@@ -3023,9 +2890,7 @@ export default function Home() {
                                             </ul>
                                         </div>
                                         <button
-                                            onClick={() =>
-                                                startCheckout(p.id)
-                                            }
+                                            onClick={() => startCheckout(p.id)}
                                             disabled={creatingCheckout}
                                             className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-500 hover:to-yellow-600 disabled:opacity-50 text-slate-950 font-black py-2.5 rounded-xl text-xs shadow-lg transition cursor-pointer"
                                         >
@@ -3059,7 +2924,6 @@ export default function Home() {
                         {checkoutState === 'waiting' && (
                             <>
                                 {checkout.qrImageUrl ? (
-                                    // eslint-disable-next-line @next/next/no-img-element
                                     <img
                                         src={checkout.qrImageUrl}
                                         alt="PromptPay QR"
@@ -3072,7 +2936,6 @@ export default function Home() {
                                 )}
                                 <p className="text-xs text-slate-300">
                                     สแกนด้วยแอปธนาคารเพื่อชำระเงิน
-                                    ระบบจะเปิดสิทธิ์ให้อัตโนมัติ
                                 </p>
                                 {checkout.expiresAt && (
                                     <p className="text-[11px] text-slate-500">
@@ -3102,7 +2965,7 @@ export default function Home() {
                         {checkoutState === 'failed' && (
                             <>
                                 <p className="text-sm font-bold text-rose-300">
-                                    การชำระเงินไม่สำเร็จหรือ QR หมดอายุ
+                                    การชำระเงินไม่สำเร็จ
                                 </p>
                                 <button
                                     onClick={() => {
@@ -3119,13 +2982,12 @@ export default function Home() {
                 </div>
             )}
 
-            {/* Lightbox Gallery */}
+            {/* Lightbox */}
             {lightboxIndex && (
                 <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[70] flex flex-col">
                     <div className="flex items-center justify-between p-4 border-b border-white/10">
                         <div className="text-white text-sm font-bold">
-                            {lightboxIndex.index + 1} /{' '}
-                            {lightboxIndex.items.length}
+                            {lightboxIndex.index + 1} / {lightboxIndex.items.length}
                         </div>
                         <button
                             onClick={() => setLightboxIndex(null)}
@@ -3155,36 +3017,21 @@ export default function Home() {
                         )}
 
                         <div className="max-w-6xl max-h-full flex items-center justify-center">
-                            {lightboxIndex.items[lightboxIndex.index]
-                                ?.type === 'video' ? (
+                            {lightboxIndex.items[lightboxIndex.index]?.type ===
+                            'video' ? (
                                 <video
                                     key={lightboxIndex.index}
-                                    src={
-                                        lightboxIndex.items[
-                                            lightboxIndex.index
-                                        ].url
-                                    }
+                                    src={lightboxIndex.items[lightboxIndex.index].url}
                                     controls
                                     autoPlay
                                     playsInline
                                     className="max-w-full max-h-[80vh] rounded-xl shadow-2xl"
                                 />
                             ) : (
-                                // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                     key={lightboxIndex.index}
-                                    src={
-                                        lightboxIndex.items[
-                                            lightboxIndex.index
-                                        ].url
-                                    }
+                                    src={lightboxIndex.items[lightboxIndex.index].url}
                                     alt={`media-${lightboxIndex.index}`}
-                                    onError={(e) => {
-                                        (
-                                            e.target as HTMLImageElement
-                                        ).src =
-                                            'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
-                                    }}
                                     className="max-w-full max-h-[80vh] rounded-xl shadow-2xl object-contain"
                                 />
                             )}
@@ -3232,7 +3079,6 @@ export default function Home() {
                                                 className="w-full h-full object-cover"
                                             />
                                         ) : (
-                                            // eslint-disable-next-line @next/next/no-img-element
                                             <img
                                                 src={m.url}
                                                 alt={`thumb-${i}`}
