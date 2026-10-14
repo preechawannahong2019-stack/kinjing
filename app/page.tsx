@@ -58,6 +58,10 @@ interface Review {
     reviewer_name: string;
     view_count: number;
     created_at: string;
+    latitude: number | null;
+    longitude: number | null;
+    address: string | null;
+    recommender_name: string | null;
 }
 
 interface ReviewEditRequest {
@@ -294,6 +298,13 @@ export default function Home() {
     const [activeTab, setActiveTab] = useState('ทั้งหมด');
     const [searchQuery, setSearchQuery] = useState('');
 
+    // --- Recommender + GPS ---
+    const [newRecommender, setNewRecommender] = useState('');
+    const [newAddress, setNewAddress] = useState('');
+    const [newLatitude, setNewLatitude] = useState<number | null>(null);
+    const [newLongitude, setNewLongitude] = useState<number | null>(null);
+    const [gettingLocation, setGettingLocation] = useState(false);
+
     // --- Admin ---
     const [showLogin, setShowLogin] = useState(false);
     const [password, setPassword] = useState('');
@@ -376,7 +387,6 @@ export default function Home() {
         setTimeout(() => setToast(null), 4000);
     }, []);
 
-// ### ⬇️⬇️⬇️  ⬇️⬇️⬇️
     // ==================== Refresh Functions ====================
     const refreshMe = useCallback(async () => {
         const r = await api<MeResponse>('/api/me');
@@ -417,7 +427,6 @@ export default function Home() {
     }, []);
 
     // ==================== Effects ====================
-    // Load initial data on mount
     useEffect(() => {
         (async () => {
             await api('/api/auth/guest', { method: 'POST' });
@@ -426,7 +435,6 @@ export default function Home() {
         })();
     }, [refreshMe, refreshReviews]);
 
-    // Set current dates after mount
     useEffect(() => {
         const today = new Date().toISOString().slice(0, 10);
         const end = new Date(Date.now() + 30 * 86400000)
@@ -440,19 +448,16 @@ export default function Home() {
         }));
     }, []);
 
-    // Refresh sponsorship when membership changes
     useEffect(() => {
         if (!ready) return;
         refreshSponsorship();
     }, [ready, membership.isVip, refreshSponsorship]);
 
-    // Refresh payouts when ready
     useEffect(() => {
         if (!ready) return;
         refreshPayouts();
     }, [ready, refreshPayouts]);
 
-    // ESC/Arrow keys for lightbox
     useEffect(() => {
         if (!lightboxIndex) return;
         const handler = (e: KeyboardEvent) => {
@@ -480,7 +485,6 @@ export default function Home() {
         return () => window.removeEventListener('keydown', handler);
     }, [lightboxIndex]);
 
-    // ==================== Tracking ====================
     const trackView = useCallback(async (reviewId: string) => {
         const r = await api<{ counted: number; viewCount: number }>(
             `/api/reviews/${reviewId}/view`,
@@ -497,7 +501,6 @@ export default function Home() {
         }
     }, []);
 
-    // ==================== Payment Polling ====================
     const paymentId = checkout?.paymentId;
     useEffect(() => {
         if (!paymentId) return;
@@ -531,6 +534,7 @@ export default function Home() {
 
     const closeCheckout = () => setCheckout(null);
 
+// ### ⬇️⬇️⬇️ วางส่วนที่ 2 ต่อจากตรงนี้ ⬇️⬇️⬇️
     // ==================== Checkout ====================
     const startCheckout = async (planId: string) => {
         setCreatingCheckout(true);
@@ -604,7 +608,7 @@ export default function Home() {
         return r.ok;
     };
 
-    // ==================== Sponsorship CRUD ====================
+    // ==================== Sponsorship ====================
     const handleCreateSponsorship = async (e: React.FormEvent) => {
         e.preventDefault();
         const ok = await adminAction('/api/admin/sponsorships', 'POST', form);
@@ -674,7 +678,74 @@ export default function Home() {
         if (ok) showToast('คำนวณและสร้างรายการจ่ายรางวัลแล้ว');
     };
 
-    // ==================== Edit Review ====================
+    // ==================== Review: ลบ (Admin) ====================
+    const handleDeleteReview = async (reviewId: string, name: string) => {
+        const confirmed = window.confirm(
+            `ต้องการลบรีวิว "${name}" ใช่หรือไม่?\n\nการลบไม่สามารถเรียกคืนได้`
+        );
+        if (!confirmed) return;
+
+        const r = await api<{ error?: string }>(`/api/reviews/${reviewId}`, {
+            method: 'DELETE',
+        });
+        if (!r.ok) {
+            showToast(`❌ ${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
+            return;
+        }
+        showToast('✓ ลบรีวิวสำเร็จ');
+        await refreshReviews();
+    };
+
+    // ==================== Review: แชร์ ====================
+    const shareReview = async (review: Review) => {
+        const url = `${window.location.origin}/#review-${review.id}`;
+        const text = `🍜 ${review.name}\n⭐ ${review.rating}\n📍 ${review.must_try}\n\nดูรีวิวเต็ม: `;
+
+        if (navigator.share) {
+            try {
+                await navigator.share({
+                    title: review.name,
+                    text: text,
+                    url: url,
+                });
+                showToast('✓ แชร์สำเร็จ');
+            } catch (err) {
+                /* user cancelled */
+            }
+        } else {
+            try {
+                await navigator.clipboard.writeText(text + url);
+                showToast('✓ คัดลอกลิงก์แล้ว');
+            } catch {
+                showToast('❌ ไม่สามารถแชร์ได้');
+            }
+        }
+    };
+
+    // ==================== GPS: ดึงตำแหน่ง ====================
+    const getCurrentLocation = () => {
+        if (!navigator.geolocation) {
+            showToast('❌ เบราว์เซอร์ไม่รองรับ GPS');
+            return;
+        }
+        setGettingLocation(true);
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                setNewLatitude(pos.coords.latitude);
+                setNewLongitude(pos.coords.longitude);
+                setGettingLocation(false);
+                showToast('✓ ได้ตำแหน่งแล้ว');
+            },
+            (err) => {
+                console.error(err);
+                showToast('❌ ไม่สามารถดึงตำแหน่งได้');
+                setGettingLocation(false);
+            },
+            { enableHighAccuracy: true, timeout: 10000 }
+        );
+    };
+
+    // ==================== Review: แก้ไข ====================
     const openEditReview = (r: Review) => {
         setEditingReview(r);
         setEditReviewForm({
@@ -684,38 +755,6 @@ export default function Home() {
             mediaItems: parseMediaItems(r.media_items),
         });
     };
-    const handleDeleteReview = async (reviewId: string, name: string) => {
-    const confirmed = window.confirm(
-        `ต้องการลบรีวิว "${name}" ใช่หรือไม่?\n\nการลบไม่สามารถเรียกคืนได้`
-    );
-    if (!confirmed) return;
-
-    const r = await api<{ error?: string }>(`/api/reviews/${reviewId}`, {
-        method: 'DELETE',
-    });
-    if (!r.ok) {
-        showToast(`❌ ${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
-        return;
-    }
-    showToast('✓ ลบรีวิวสำเร็จ');
-    await refreshReviews();
-};
-    const handleDeleteReview = async (reviewId: string, name: string) => {
-    const confirmed = window.confirm(
-        `ต้องการลบรีวิว "${name}" ใช่หรือไม่?\n\nการลบไม่สามารถเรียกคืนได้`
-    );
-    if (!confirmed) return;
-
-    const r = await api<{ error?: string }>(`/api/reviews/${reviewId}`, {
-        method: 'DELETE',
-    });
-    if (!r.ok) {
-        showToast(`❌ ${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
-        return;
-    }
-    showToast('✓ ลบรีวิวสำเร็จ');
-    await refreshReviews();
-};
 
     const handleUpdateReview = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -770,7 +809,7 @@ export default function Home() {
         }));
     };
 
-    // ==================== Request Edit ====================
+    // ==================== Review: ส่งคำขอให้ Admin ====================
     const openRequestModal = (r: Review) => {
         setShowRequestModal(r);
         setRequestReason('');
@@ -854,7 +893,7 @@ export default function Home() {
         }
     };
 
-    // ==================== Multi-Media Upload ====================
+    // ==================== Media Upload (หลายไฟล์) ====================
     const handleFilesUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = e.target.files;
         if (!files || files.length === 0) return;
@@ -892,7 +931,7 @@ export default function Home() {
         });
     };
 
-    // ==================== Create Review ====================
+    // ==================== Review: สร้างใหม่ ====================
     const handleAddReview = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newName.trim() || !newMustTry.trim()) return;
@@ -912,6 +951,10 @@ export default function Home() {
                 category: newCategory,
                 mustTry: newMustTry,
                 mediaItems,
+                latitude: newLatitude,
+                longitude: newLongitude,
+                address: newAddress,
+                recommenderName: newRecommender,
             }),
         });
 
@@ -924,6 +967,10 @@ export default function Home() {
         setNewName('');
         setNewMustTry('');
         setNewMedia([]);
+        setNewRecommender('');
+        setNewAddress('');
+        setNewLatitude(null);
+        setNewLongitude(null);
         setShowAddForm(false);
         await refreshReviews();
     };
@@ -950,11 +997,10 @@ export default function Home() {
         });
     }, [reviews, activeTab, searchQuery]);
 
+// ### ⬇️⬇️⬇️ วางส่วนที่ 3 ต่อจากตรงนี้ ⬇️⬇️⬇️
     // ==================== Return JSX ====================
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6 space-y-6">
-
-
             {/* Toast */}
             {toast && (
                 <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] bg-slate-800 border border-slate-600 text-white text-sm px-4 py-2.5 rounded-xl shadow-2xl">
@@ -1632,7 +1678,7 @@ export default function Home() {
                 </section>
             )}
 
-            {/* Review Edit Requests Panel */}
+            {/* Review Requests Panel */}
             {isAdmin && showReviewRequests && (
                 <section className="bg-slate-900 border-2 border-violet-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
                     <div className="flex justify-between items-center border-b border-slate-800 pb-3">
@@ -2031,6 +2077,46 @@ export default function Home() {
                         required
                     />
 
+                    {/* ผู้แนะนำ */}
+                    <input
+                        type="text"
+                        placeholder="ผู้แนะนำ (เช่น สมชาย xxx)"
+                        value={newRecommender}
+                        onChange={(e) => setNewRecommender(e.target.value)}
+                        maxLength={50}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                    />
+
+                    {/* ที่อยู่ */}
+                    <input
+                        type="text"
+                        placeholder="ที่อยู่ร้าน (ไม่บังคับ)"
+                        value={newAddress}
+                        onChange={(e) => setNewAddress(e.target.value)}
+                        maxLength={500}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                    />
+
+                    {/* GPS */}
+                    <div className="flex gap-2">
+                        <button
+                            type="button"
+                            onClick={getCurrentLocation}
+                            disabled={gettingLocation}
+                            className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-2 rounded-lg text-xs cursor-pointer"
+                        >
+                            {gettingLocation
+                                ? '⏳ กำลังดึงตำแหน่ง...'
+                                : '📍 ใช้ตำแหน่งปัจจุบัน'}
+                        </button>
+                        {newLatitude && newLongitude && (
+                            <span className="flex items-center gap-1 text-[10px] text-emerald-300 bg-emerald-950/40 px-3 rounded-lg">
+                                ✓ {newLatitude.toFixed(4)},{' '}
+                                {newLongitude.toFixed(4)}
+                            </span>
+                        )}
+                    </div>
+
                     <div className="space-y-2">
                         <label className="block text-xs font-bold text-slate-300">
                             รูปภาพ / วิดีโอ ({newMedia.length}/{MAX_MEDIA_ITEMS})
@@ -2245,6 +2331,17 @@ export default function Home() {
                                         <p className="text-[11px] text-slate-400">
                                             {res.category} • {res.reviewer_name}
                                         </p>
+                                        {res.recommender_name && (
+                                            <p className="text-[11px] text-amber-300 mt-0.5">
+                                                👤 แนะนำโดย:{' '}
+                                                {res.recommender_name}
+                                            </p>
+                                        )}
+                                        {res.address && (
+                                            <p className="text-[11px] text-slate-400 mt-0.5">
+                                                📍 {res.address}
+                                            </p>
+                                        )}
                                     </div>
                                     <span className="bg-amber-500/20 text-amber-400 font-black text-sm px-2.5 py-1 rounded-lg border border-amber-500/30 shrink-0">
                                         ★ {Number(res.rating).toFixed(1)}
@@ -2284,7 +2381,7 @@ export default function Home() {
                                     👁 เปิดดู ({items.length} ไฟล์ • นับวิว)
                                 </button>
 
-                                <div className="flex gap-1.5">
+                                <div className="flex gap-1.5 flex-wrap">
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
@@ -2303,71 +2400,44 @@ export default function Home() {
                                     >
                                         📨 ส่งคำขอ
                                     </button>
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            shareReview(res);
+                                        }}
+                                        className="text-[11px] bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
+                                        title="แชร์รีวิว"
+                                    >
+                                        🔗
+                                    </button>
+                                    {res.latitude && res.longitude && (
+                                        <a
+                                            href={`https://www.google.com/maps/search/?api=1&query=${res.latitude},${res.longitude}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="text-[11px] bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
+                                            title="ดูพิกัดร้าน"
+                                        >
+                                            📍
+                                        </a>
+                                    )}
+                                    {isAdmin && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteReview(
+                                                    res.id,
+                                                    res.name
+                                                );
+                                            }}
+                                            className="text-[11px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
+                                            title="ลบรีวิว (Admin)"
+                                        >
+                                            🗑️
+                                        </button>
+                                    )}
                                 </div>
-                                <div className="flex gap-1.5">
-                                  <div className="flex gap-1.5">
-    <button
-        onClick={(e) => {
-            e.stopPropagation();
-            openEditReview(res);
-        }}
-        className="flex-1 text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 py-2 rounded-lg cursor-pointer transition"
-    >
-        ✏️ แก้ไข
-    </button>
-    <button
-        onClick={(e) => {
-            e.stopPropagation();
-            openRequestModal(res);
-        }}
-        className="flex-1 text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 py-2 rounded-lg cursor-pointer transition"
-    >
-        📨 ส่งคำขอ
-    </button>
-    {isAdmin && (
-        <button
-            onClick={(e) => {
-                e.stopPropagation();
-                handleDeleteReview(res.id, res.name);
-            }}
-            className="text-[11px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
-            title="ลบรีวิว (Admin)"
-        >
-            🗑️
-        </button>
-    )}
-</div>
-    <button
-        onClick={(e) => {
-            e.stopPropagation();
-            openEditReview(res);
-        }}
-        className="flex-1 text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 py-2 rounded-lg cursor-pointer transition"
-    >
-        ✏️ แก้ไข
-    </button>
-    <button
-        onClick={(e) => {
-            e.stopPropagation();
-            openRequestModal(res);
-        }}
-        className="flex-1 text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 py-2 rounded-lg cursor-pointer transition"
-    >
-        📨 ส่งคำขอ
-    </button>
-    {isAdmin && (
-        <button
-            onClick={(e) => {
-                e.stopPropagation();
-                handleDeleteReview(res.id, res.name);
-            }}
-            className="text-[11px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
-            title="ลบรีวิว (Admin)"
-        >
-            🗑️
-        </button>
-    )}
-</div>
                             </div>
                         </article>
                     );

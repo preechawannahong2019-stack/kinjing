@@ -349,7 +349,6 @@ function parseMediaItems(raw: unknown): MediaItem[] {
     }
     return out;
 }
-
 // ==================== ROUTE: auth/guest ====================
 async function h_auth_guest_POST(req: NextRequest) {
     const userId = getUserId(req);
@@ -529,7 +528,8 @@ async function h_reviews_GET(req: NextRequest) {
 
     const rows = await query(
         `SELECT id, name, category, rating, must_try, tags,
-                media_items, reviewer_name, view_count, created_at
+                media_items, reviewer_name, view_count, created_at,
+                latitude, longitude, address, recommender_name
          FROM restaurants
          ORDER BY view_count DESC, created_at DESC
          LIMIT $1 OFFSET $2`,
@@ -552,8 +552,26 @@ async function h_reviews_POST(req: NextRequest) {
             : 'สตรีทฟู้ดร้านลับ';
     const mustTry =
         typeof body?.mustTry === 'string' ? body.mustTry.trim().slice(0, 300) : '';
+    const mediaType = body?.mediaType === 'video' ? 'video' : 'image';
+    const mediaUrl =
+        typeof body?.mediaUrl === 'string' ? body.mediaUrl.trim().slice(0, 500) : '';
 
     const mediaItems = parseMediaItems(body?.mediaItems);
+
+    const latitude = Number.isFinite(Number(body?.latitude))
+        ? Number(body.latitude)
+        : null;
+    const longitude = Number.isFinite(Number(body?.longitude))
+        ? Number(body.longitude)
+        : null;
+    const address =
+        typeof body?.address === 'string'
+            ? body.address.trim().slice(0, 500)
+            : null;
+    const recommenderName =
+        typeof body?.recommenderName === 'string'
+            ? body.recommenderName.trim().slice(0, 50)
+            : null;
 
     if (!name || !mustTry) {
         return NextResponse.json(
@@ -561,11 +579,6 @@ async function h_reviews_POST(req: NextRequest) {
             { status: 400 }
         );
     }
-
-    // ใช้ media ตัวแรกสำหรับ media_type / media_url (backward compat)
-    const firstMedia = mediaItems[0];
-    const mediaType = firstMedia?.type ?? 'image';
-    const mediaUrl = firstMedia?.url ?? null;
 
     const users = await query<{ display_name: string }>(
         'SELECT display_name FROM users WHERE id=$1',
@@ -576,8 +589,8 @@ async function h_reviews_POST(req: NextRequest) {
     const [row] = await query<{ id: string }>(
         `INSERT INTO restaurants
          (name, category, must_try, media_type, media_url, media_items,
-          reviewer_id, reviewer_name)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING id`,
+          reviewer_id, reviewer_name, latitude, longitude, address, recommender_name)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12) RETURNING id`,
         [
             name,
             category,
@@ -587,6 +600,10 @@ async function h_reviews_POST(req: NextRequest) {
             JSON.stringify(mediaItems),
             uid,
             reviewerName,
+            latitude,
+            longitude,
+            address,
+            recommenderName,
         ]
     );
     await audit(
@@ -597,7 +614,8 @@ async function h_reviews_POST(req: NextRequest) {
     );
     return NextResponse.json({ ok: true, id: row.id });
 }
-// ==================== ROUTE: reviews/:id (PATCH — แก้ไขรีวิวของตัวเอง) ====================
+
+// ==================== ROUTE: reviews/:id (PATCH — แก้ไข) ====================
 async function h_reviews_id_PATCH(
     req: NextRequest,
     { params }: { params: Promise<{ id: string }> }
@@ -618,19 +636,12 @@ async function h_reviews_id_PATCH(
         return NextResponse.json({ error: 'not found' }, { status: 404 });
 
     const isAdmin = isAdminReq(req);
-if (owners[0].reviewer_id !== uid && !isAdmin) {
-    return NextResponse.json(
-        { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
-        { status: 403 }
-    );
-}
-const isAdmin = isAdminReq(req);
-if (owners[0].reviewer_id !== uid && !isAdmin) {
-    return NextResponse.json(
-        { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
-        { status: 403 }
-    );
-}
+    if (owners[0].reviewer_id !== uid && !isAdmin) {
+        return NextResponse.json(
+            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
+            { status: 403 }
+        );
+    }
 
     const body = await req.json().catch(() => ({}));
     const name =
@@ -681,7 +692,48 @@ if (owners[0].reviewer_id !== uid && !isAdmin) {
     return NextResponse.json({ ok: true });
 }
 
-// ==================== ROUTE: reviews/:id/edit_request (POST — ส่งคำขอ) ====================
+// ==================== ROUTE: reviews/:id (DELETE — ลบ) ====================
+async function h_reviews_id_DELETE(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id))
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+
+    const uid = getUserId(req);
+    const isAdmin = isAdminReq(req);
+
+    if (!uid && !isAdmin)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+
+    const owners = await query<{ reviewer_id: string | null }>(
+        'SELECT reviewer_id FROM restaurants WHERE id=$1',
+        [id]
+    );
+    if (!owners[0])
+        return NextResponse.json({ error: 'not found' }, { status: 404 });
+
+    if (owners[0].reviewer_id !== uid && !isAdmin) {
+        return NextResponse.json(
+            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้' },
+            { status: 403 }
+        );
+    }
+
+    await query('DELETE FROM restaurants WHERE id=$1', [id]);
+
+    await audit(
+        isAdmin ? 'admin' : uid,
+        'review_deleted',
+        { restaurantId: id },
+        ipHash(req)
+    );
+
+    return NextResponse.json({ ok: true });
+}
+
+// ==================== ROUTE: reviews/:id/edit_request ====================
 async function h_reviews_id_edit_request_POST(
     req: NextRequest,
     { params }: { params: Promise<{ id: string }> }
@@ -755,46 +807,8 @@ async function h_reviews_id_edit_request_POST(
 
     return NextResponse.json({ ok: true, requestId: row.id });
 }
-// ==================== ROUTE: reviews/:id (DELETE — ลบรีวิว) ====================
-async function h_reviews_id_DELETE(
-    req: NextRequest,
-    { params }: { params: Promise<{ id: string }> }
-) {
-    const { id } = await params;
-    if (!isUuid(id))
-        return NextResponse.json({ error: 'bad request' }, { status: 400 });
 
-    const uid = getUserId(req);
-    const isAdmin = isAdminReq(req);
-
-    if (!uid && !isAdmin)
-        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
-
-    const owners = await query<{ reviewer_id: string | null }>(
-        'SELECT reviewer_id FROM restaurants WHERE id=$1',
-        [id]
-    );
-    if (!owners[0])
-        return NextResponse.json({ error: 'not found' }, { status: 404 });
-
-    if (owners[0].reviewer_id !== uid && !isAdmin) {
-        return NextResponse.json(
-            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้' },
-            { status: 403 }
-        );
-    }
-
-    await query('DELETE FROM restaurants WHERE id=$1', [id]);
-
-    await audit(
-        isAdmin ? 'admin' : uid,
-        'review_deleted',
-        { restaurantId: id },
-        ipHash(req)
-    );
-
-    return NextResponse.json({ ok: true });
-}
+// ==================== ROUTE: reviews/:id/view ====================
 async function h_reviews_id_view_POST(
     req: NextRequest,
     { params }: { params: Promise<{ id: string }> }
@@ -839,49 +853,7 @@ async function h_reviews_id_view_POST(
     });
 }
 
-    // ==================== ROUTE: reviews/:id (DELETE — ลบรีวิว) ====================
-async function h_reviews_id_DELETE(
-    req: NextRequest,
-    { params }: { params: Promise<{ id: string }> }
-) {
-    const { id } = await params;
-    if (!isUuid(id))
-        return NextResponse.json({ error: 'bad request' }, { status: 400 });
-
-    const uid = getUserId(req);
-    const isAdmin = isAdminReq(req);
-
-    if (!uid && !isAdmin)
-        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
-
-    // ตรวจสอบเจ้าของรีวิว
-    const owners = await query<{ reviewer_id: string | null }>(
-        'SELECT reviewer_id FROM restaurants WHERE id=$1',
-        [id]
-    );
-    if (!owners[0])
-        return NextResponse.json({ error: 'not found' }, { status: 404 });
-
-    if (owners[0].reviewer_id !== uid && !isAdmin) {
-        return NextResponse.json(
-            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้' },
-            { status: 403 }
-        );
-    }
-
-    await query('DELETE FROM restaurants WHERE id=$1', [id]);
-
-    await audit(
-        isAdmin ? 'admin' : uid,
-        'review_deleted',
-        { restaurantId: id },
-        ipHash(req)
-    );
-
-    return NextResponse.json({ ok: true });
-}
-
-// ==================== ROUTE: sponsorships ====================
+// ==================== ROUTE: sponsorships/active ====================
 async function h_sponsorships_active_GET(req: NextRequest) {
     const uid = getUserId(req);
     if (uid) {
@@ -902,7 +874,6 @@ async function h_sponsorships_active_GET(req: NextRequest) {
         { headers: { 'Cache-Control': 'no-store, max-age=0' } }
     );
 }
-
 // ==================== ROUTE: admin/login ====================
 const attempts = new Map<string, { n: number; reset: number }>();
 
@@ -1120,7 +1091,6 @@ async function h_admin_sponsorships_id_PATCH(
 
     const body = await req.json().catch(() => ({}));
 
-    // โหมด 1: เปลี่ยนสถานะอย่างเดียว
     if (
         body?.status &&
         Object.keys(body).length === 1 &&
@@ -1142,7 +1112,6 @@ async function h_admin_sponsorships_id_PATCH(
         return NextResponse.json({ ok: true });
     }
 
-    // โหมด 2: แก้ไขข้อมูลทั้งหมด
     const brandName = str(body.brandName, 120);
     const headline = str(body.headline, 200);
     const subText = str(body.subText, 300);
@@ -1433,6 +1402,167 @@ async function h_admin_payouts_id_PATCH(
     return NextResponse.json({ ok: true });
 }
 
+// ==================== ROUTE: admin/review_requests ====================
+async function h_admin_review_requests_GET(req: NextRequest) {
+    if (!isAdminReq(req))
+        return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+
+    const status = req.nextUrl.searchParams.get('status') ?? 'pending';
+    const allowed = ['pending', 'approved', 'rejected', 'done', 'all'];
+    const filter = allowed.includes(status) ? status : 'pending';
+
+    const rows = await query(
+        `SELECT r.id, r.restaurant_id, r.requester_id, r.requester_name,
+                r.reason, r.proposed_changes, r.status, r.admin_note,
+                r.reviewed_by, r.reviewed_at, r.created_at,
+                rest.name AS restaurant_name,
+                rest.must_try AS restaurant_must_try,
+                rest.category AS restaurant_category,
+                rest.reviewer_name AS restaurant_reviewer_name
+         FROM review_edit_requests r
+         JOIN restaurants rest ON rest.id = r.restaurant_id
+         WHERE ($1 = 'all' OR r.status = $1)
+         ORDER BY r.created_at DESC LIMIT 100`,
+        [filter]
+    );
+
+    const [counts] = await query<{
+        pending: number;
+        approved: number;
+        rejected: number;
+        done: number;
+    }>(
+        `SELECT
+            COUNT(*) FILTER (WHERE status='pending')::int AS pending,
+            COUNT(*) FILTER (WHERE status='approved')::int AS approved,
+            COUNT(*) FILTER (WHERE status='rejected')::int AS rejected,
+            COUNT(*) FILTER (WHERE status='done')::int AS done
+         FROM review_edit_requests`
+    );
+
+    return NextResponse.json({ requests: rows, counts });
+}
+
+async function h_admin_review_requests_id_PATCH(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req))
+        return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+
+    const { id } = await params;
+    if (!isUuid(id))
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+
+    const body = await req.json().catch(() => ({}));
+    const action = body?.action;
+    const adminNote =
+        typeof body?.adminNote === 'string'
+            ? body.adminNote.trim().slice(0, 500)
+            : null;
+
+    if (!['approve', 'reject', 'done'].includes(action)) {
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    }
+
+    const result = await withTx(async (c) => {
+        const found = await c.query(
+            `SELECT * FROM review_edit_requests WHERE id=$1 FOR UPDATE`,
+            [id]
+        );
+        const r = found.rows[0];
+        if (!r) return { ok: false as const, error: 'not found' };
+
+        if (action === 'approve') {
+            const changes = (r.proposed_changes ?? {}) as Record<string, unknown>;
+
+            const orig = await c.query(
+                `SELECT name, category, must_try, media_items
+                 FROM restaurants WHERE id=$1 FOR UPDATE`,
+                [r.restaurant_id]
+            );
+            if (!orig.rows[0])
+                return { ok: false as const, error: 'restaurant not found' };
+
+            const old = orig.rows[0];
+            const newName =
+                typeof changes.name === 'string' ? changes.name : old.name;
+            const newCategory =
+                typeof changes.category === 'string'
+                    ? changes.category
+                    : old.category;
+            const newMustTry =
+                typeof changes.mustTry === 'string'
+                    ? changes.mustTry
+                    : old.must_try;
+
+            let newMedia = old.media_items;
+            if (
+                Array.isArray(changes.mediaItems) &&
+                changes.mediaItems.length > 0
+            ) {
+                newMedia = JSON.stringify(changes.mediaItems);
+            }
+
+            const mediaArr =
+                typeof newMedia === 'string' ? JSON.parse(newMedia) : newMedia;
+            const firstMedia =
+                Array.isArray(mediaArr) && mediaArr[0] ? mediaArr[0] : null;
+
+            await c.query(
+                `UPDATE restaurants
+                 SET name=$2, category=$3, must_try=$4,
+                     media_type=$5, media_url=$6, media_items=$7::jsonb,
+                     updated_at=now()
+                 WHERE id=$1`,
+                [
+                    r.restaurant_id,
+                    newName,
+                    newCategory,
+                    newMustTry,
+                    firstMedia?.type ?? 'image',
+                    firstMedia?.url ?? null,
+                    typeof newMedia === 'string'
+                        ? newMedia
+                        : JSON.stringify(newMedia),
+                ]
+            );
+        }
+
+        const newStatus =
+            action === 'approve'
+                ? 'approved'
+                : action === 'reject'
+                ? 'rejected'
+                : 'done';
+
+        await c.query(
+            `UPDATE review_edit_requests
+             SET status=$2, admin_note=$3, reviewed_by='admin',
+                 reviewed_at=now()
+             WHERE id=$1`,
+            [id, newStatus, adminNote]
+        );
+
+        await auditTx(
+            c,
+            'admin',
+            `review_request_${action}`,
+            { requestId: id, restaurantId: r.restaurant_id, adminNote },
+            ipHash(req)
+        );
+
+        return { ok: true as const };
+    });
+
+    if (!result.ok) {
+        if (result.error === 'not found')
+            return NextResponse.json({ error: 'not found' }, { status: 404 });
+        return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json({ ok: true });
+}
+
 // ==================== ROUTE: me/payouts ====================
 async function h_me_payouts_GET(req: NextRequest) {
     const uid = getUserId(req);
@@ -1465,6 +1595,25 @@ async function h_me_payouts_GET(req: NextRequest) {
         totalPaidSatang: Number(total.n),
         totalPendingSatang: Number(pending.n),
     });
+}
+
+// ==================== ROUTE: me/review_requests ====================
+async function h_me_review_requests_GET(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+
+    const rows = await query(
+        `SELECT r.id, r.restaurant_id, r.reason, r.status, r.admin_note,
+                r.created_at, r.reviewed_at,
+                rest.name AS restaurant_name
+         FROM review_edit_requests r
+         JOIN restaurants rest ON rest.id = r.restaurant_id
+         WHERE r.requester_id=$1
+         ORDER BY r.created_at DESC LIMIT 50`,
+        [uid]
+    );
+    return NextResponse.json({ requests: rows });
 }
 
 // ==================== ROUTE: cron/daily ====================
@@ -1524,6 +1673,7 @@ const STATIC_ROUTES: Record<string, StaticRoute> = {
     'POST auth/guest': h_auth_guest_POST as StaticRoute,
     'GET me': h_me_GET as StaticRoute,
     'GET me/payouts': h_me_payouts_GET as StaticRoute,
+    'GET me/review_requests': h_me_review_requests_GET as StaticRoute,
     'POST subscriptions': h_subscriptions_POST as StaticRoute,
     'GET subscriptions/status': h_subscriptions_status_GET as StaticRoute,
     'POST webhooks/omise': h_webhooks_omise_POST as StaticRoute,
@@ -1535,9 +1685,8 @@ const STATIC_ROUTES: Record<string, StaticRoute> = {
     'GET admin/summary': h_admin_summary_GET as StaticRoute,
     'POST admin/sponsorships': h_admin_sponsorships_POST as StaticRoute,
     'POST admin/run_payout': h_admin_run_payout_POST as StaticRoute,
-    'GET cron/daily': h_cron_daily_GET as StaticRoute,
-        'GET me/review_requests': h_me_review_requests_GET as StaticRoute,
     'GET admin/review_requests': h_admin_review_requests_GET as StaticRoute,
+    'GET cron/daily': h_cron_daily_GET as StaticRoute,
 };
 
 async function dispatch(
@@ -1552,6 +1701,52 @@ async function dispatch(
         const fn = STATIC_ROUTES[key];
         if (fn) return await fn(req, ctx);
 
+        // PATCH /api/reviews/:id
+        if (
+            method === 'PATCH' &&
+            path.length === 2 &&
+            path[0] === 'reviews'
+        ) {
+            return await h_reviews_id_PATCH(req, {
+                params: Promise.resolve({ id: path[1] }),
+            });
+        }
+
+        // DELETE /api/reviews/:id
+        if (
+            method === 'DELETE' &&
+            path.length === 2 &&
+            path[0] === 'reviews'
+        ) {
+            return await h_reviews_id_DELETE(req, {
+                params: Promise.resolve({ id: path[1] }),
+            });
+        }
+
+        // POST /api/reviews/:id/edit_request
+        if (
+            method === 'POST' &&
+            path.length === 3 &&
+            path[0] === 'reviews' &&
+            path[2] === 'edit_request'
+        ) {
+            return await h_reviews_id_edit_request_POST(req, {
+                params: Promise.resolve({ id: path[1] }),
+            });
+        }
+
+        // POST /api/reviews/:id/view
+        if (
+            method === 'POST' &&
+            path.length === 3 &&
+            path[0] === 'reviews' &&
+            path[2] === 'view'
+        ) {
+            return await h_reviews_id_view_POST(req, {
+                params: Promise.resolve({ id: path[1] }),
+            });
+        }
+
         // PATCH /api/admin/sponsorships/:id
         if (
             method === 'PATCH' &&
@@ -1563,86 +1758,7 @@ async function dispatch(
                 params: Promise.resolve({ id: path[2] }),
             });
         }
-                // PATCH /api/reviews/:id
-        if (
-            method === 'PATCH' &&
-            path.length === 2 &&
-            path[0] === 'reviews'
-        ) {
-            return await h_reviews_id_PATCH(req, {
-                params: Promise.resolve({ id: path[1] }),
-            });
-        }
-                // DELETE /api/reviews/:id
-        if (
-            method === 'DELETE' &&
-            path.length === 2 &&
-            path[0] === 'reviews'
-        ) {
-            return await h_reviews_id_DELETE(req, {
-                params: Promise.resolve({ id: path[1] }),
-            });
-        }
 
-                // PATCH /api/reviews/:id
-                // DELETE /api/reviews/:id
-if (
-    method === 'DELETE' &&
-    path.length === 2 &&
-    path[0] === 'reviews'
-) {
-    return await h_reviews_id_DELETE(req, {
-        params: Promise.resolve({ id: path[1] }),
-    });
-}
-export async function DELETE(req: NextRequest, ctx: RouteCtx) {
-    return dispatch(req, ctx, 'DELETE');
-}
-        if (
-            method === 'PATCH' &&
-            path.length === 2 &&
-            path[0] === 'reviews'
-        ) {
-            return await h_reviews_id_PATCH(req, {
-                params: Promise.resolve({ id: path[1] }),
-            });
-        }
-
-        // POST /api/reviews/:id/edit_request
-        if (
-            method === 'POST' &&
-            path.length === 3 &&
-            path[0] === 'reviews' &&
-            path[2] === 'edit_request'
-        ) {
-            return await h_reviews_id_edit_request_POST(req, {
-                params: Promise.resolve({ id: path[1] }),
-            });
-        }
-
-        // POST /api/reviews/:id/edit_request
-        if (
-            method === 'POST' &&
-            path.length === 3 &&
-            path[0] === 'reviews' &&
-            path[2] === 'edit_request'
-        ) {
-            return await h_reviews_id_edit_request_POST(req, {
-                params: Promise.resolve({ id: path[1] }),
-            });
-        }
-
-        // PATCH /api/admin/review_requests/:id
-        if (
-            method === 'PATCH' &&
-            path.length === 3 &&
-            path[0] === 'admin' &&
-            path[1] === 'review_requests'
-        ) {
-            return await h_admin_review_requests_id_PATCH(req, {
-                params: Promise.resolve({ id: path[2] }),
-            });
-        }
         // PATCH /api/admin/payouts/:id
         if (
             method === 'PATCH' &&
@@ -1668,15 +1784,15 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx) {
             });
         }
 
-        // POST /api/reviews/:id/view
+        // PATCH /api/admin/review_requests/:id
         if (
-            method === 'POST' &&
+            method === 'PATCH' &&
             path.length === 3 &&
-            path[0] === 'reviews' &&
-            path[2] === 'view'
+            path[0] === 'admin' &&
+            path[1] === 'review_requests'
         ) {
-            return await h_reviews_id_view_POST(req, {
-                params: Promise.resolve({ id: path[1] }),
+            return await h_admin_review_requests_id_PATCH(req, {
+                params: Promise.resolve({ id: path[2] }),
             });
         }
     } catch (err) {
@@ -1697,185 +1813,4 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx) {
 }
 export async function DELETE(req: NextRequest, ctx: RouteCtx) {
     return dispatch(req, ctx, 'DELETE');
-}
-
-// ==================== ROUTE: admin/review_requests (GET — ดูคำขอทั้งหมด) ====================
-async function h_admin_review_requests_GET(req: NextRequest) {
-    if (!isAdminReq(req))
-        return NextResponse.json({ error: 'forbidden' }, { status: 403 });
-
-    const status = req.nextUrl.searchParams.get('status') ?? 'pending';
-    const allowed = ['pending', 'approved', 'rejected', 'done', 'all'];
-    const filter = allowed.includes(status) ? status : 'pending';
-
-    const rows = await query(
-        `SELECT r.id, r.restaurant_id, r.requester_id, r.requester_name,
-                r.reason, r.proposed_changes, r.status, r.admin_note,
-                r.reviewed_by, r.reviewed_at, r.created_at,
-                rest.name AS restaurant_name,
-                rest.must_try AS restaurant_must_try,
-                rest.category AS restaurant_category,
-                rest.reviewer_name AS restaurant_reviewer_name
-         FROM review_edit_requests r
-         JOIN restaurants rest ON rest.id = r.restaurant_id
-         WHERE ($1 = 'all' OR r.status = $1)
-         ORDER BY r.created_at DESC LIMIT 100`,
-        [filter]
-    );
-
-    const [counts] = await query<{
-        pending: number;
-        approved: number;
-        rejected: number;
-        done: number;
-    }>(
-        `SELECT
-            COUNT(*) FILTER (WHERE status='pending')::int AS pending,
-            COUNT(*) FILTER (WHERE status='approved')::int AS approved,
-            COUNT(*) FILTER (WHERE status='rejected')::int AS rejected,
-            COUNT(*) FILTER (WHERE status='done')::int AS done
-         FROM review_edit_requests`
-    );
-
-    return NextResponse.json({ requests: rows, counts });
-}
-
-// ==================== ROUTE: admin/review_requests/:id (PATCH — อนุมัติ/ปฏิเสธ/แก้) ====================
-async function h_admin_review_requests_id_PATCH(
-    req: NextRequest,
-    { params }: { params: Promise<{ id: string }> }
-) {
-    if (!isAdminReq(req))
-        return NextResponse.json({ error: 'forbidden' }, { status: 403 });
-
-    const { id } = await params;
-    if (!isUuid(id))
-        return NextResponse.json({ error: 'bad request' }, { status: 400 });
-
-    const body = await req.json().catch(() => ({}));
-    const action = body?.action; // 'approve' | 'reject' | 'done'
-    const adminNote =
-        typeof body?.adminNote === 'string'
-            ? body.adminNote.trim().slice(0, 500)
-            : null;
-
-    if (!['approve', 'reject', 'done'].includes(action)) {
-        return NextResponse.json({ error: 'bad request' }, { status: 400 });
-    }
-
-    const result = await withTx(async (c) => {
-        const found = await c.query(
-            `SELECT * FROM review_edit_requests WHERE id=$1 FOR UPDATE`,
-            [id]
-        );
-        const r = found.rows[0];
-        if (!r) return { ok: false as const, error: 'not found' };
-
-        if (action === 'approve') {
-            // นำ proposed_changes ไปใช้กับรีวิว
-            const changes = (r.proposed_changes ?? {}) as Record<string, unknown>;
-
-            // ดึงข้อมูลเดิม
-            const orig = await c.query(
-                `SELECT name, category, must_try, media_items
-                 FROM restaurants WHERE id=$1 FOR UPDATE`,
-                [r.restaurant_id]
-            );
-            if (!orig.rows[0]) return { ok: false as const, error: 'restaurant not found' };
-
-            const old = orig.rows[0];
-            const newName =
-                typeof changes.name === 'string' ? changes.name : old.name;
-            const newCategory =
-                typeof changes.category === 'string'
-                    ? changes.category
-                    : old.category;
-            const newMustTry =
-                typeof changes.mustTry === 'string'
-                    ? changes.mustTry
-                    : old.must_try;
-
-            let newMedia = old.media_items;
-            if (Array.isArray(changes.mediaItems) && changes.mediaItems.length > 0) {
-                newMedia = JSON.stringify(changes.mediaItems);
-            }
-
-            const mediaArr =
-                typeof newMedia === 'string'
-                    ? JSON.parse(newMedia)
-                    : newMedia;
-            const firstMedia =
-                Array.isArray(mediaArr) && mediaArr[0] ? mediaArr[0] : null;
-
-            await c.query(
-                `UPDATE restaurants
-                 SET name=$2, category=$3, must_try=$4,
-                     media_type=$5, media_url=$6, media_items=$7::jsonb,
-                     updated_at=now()
-                 WHERE id=$1`,
-                [
-                    r.restaurant_id,
-                    newName,
-                    newCategory,
-                    newMustTry,
-                    firstMedia?.type ?? 'image',
-                    firstMedia?.url ?? null,
-                    typeof newMedia === 'string'
-                        ? newMedia
-                        : JSON.stringify(newMedia),
-                ]
-            );
-        }
-
-        const newStatus =
-            action === 'approve'
-                ? 'approved'
-                : action === 'reject'
-                ? 'rejected'
-                : 'done';
-
-        await c.query(
-            `UPDATE review_edit_requests
-             SET status=$2, admin_note=$3, reviewed_by='admin',
-                 reviewed_at=now()
-             WHERE id=$1`,
-            [id, newStatus, adminNote]
-        );
-
-        await auditTx(
-            c,
-            'admin',
-            `review_request_${action}`,
-            { requestId: id, restaurantId: r.restaurant_id, adminNote },
-            ipHash(req)
-        );
-
-        return { ok: true as const };
-    });
-
-    if (!result.ok) {
-        if (result.error === 'not found')
-            return NextResponse.json({ error: 'not found' }, { status: 404 });
-        return NextResponse.json({ error: result.error }, { status: 400 });
-    }
-    return NextResponse.json({ ok: true });
-}
-
-// ==================== ROUTE: me/review_requests (GET — ดูคำขอของตัวเอง) ====================
-async function h_me_review_requests_GET(req: NextRequest) {
-    const uid = getUserId(req);
-    if (!uid)
-        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
-
-    const rows = await query(
-        `SELECT r.id, r.restaurant_id, r.reason, r.status, r.admin_note,
-                r.created_at, r.reviewed_at,
-                rest.name AS restaurant_name
-         FROM review_edit_requests r
-         JOIN restaurants rest ON rest.id = r.restaurant_id
-         WHERE r.requester_id=$1
-         ORDER BY r.created_at DESC LIMIT 50`,
-        [uid]
-    );
-    return NextResponse.json({ requests: rows });
 }
