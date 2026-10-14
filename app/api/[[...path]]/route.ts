@@ -617,12 +617,20 @@ async function h_reviews_id_PATCH(
     if (!owners[0])
         return NextResponse.json({ error: 'not found' }, { status: 404 });
 
-    if (owners[0].reviewer_id !== uid) {
-        return NextResponse.json(
-            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
-            { status: 403 }
-        );
-    }
+    const isAdmin = isAdminReq(req);
+if (owners[0].reviewer_id !== uid && !isAdmin) {
+    return NextResponse.json(
+        { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
+        { status: 403 }
+    );
+}
+const isAdmin = isAdminReq(req);
+if (owners[0].reviewer_id !== uid && !isAdmin) {
+    return NextResponse.json(
+        { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
+        { status: 403 }
+    );
+}
 
     const body = await req.json().catch(() => ({}));
     const name =
@@ -747,6 +755,46 @@ async function h_reviews_id_edit_request_POST(
 
     return NextResponse.json({ ok: true, requestId: row.id });
 }
+// ==================== ROUTE: reviews/:id (DELETE — ลบรีวิว) ====================
+async function h_reviews_id_DELETE(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id))
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+
+    const uid = getUserId(req);
+    const isAdmin = isAdminReq(req);
+
+    if (!uid && !isAdmin)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+
+    const owners = await query<{ reviewer_id: string | null }>(
+        'SELECT reviewer_id FROM restaurants WHERE id=$1',
+        [id]
+    );
+    if (!owners[0])
+        return NextResponse.json({ error: 'not found' }, { status: 404 });
+
+    if (owners[0].reviewer_id !== uid && !isAdmin) {
+        return NextResponse.json(
+            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้' },
+            { status: 403 }
+        );
+    }
+
+    await query('DELETE FROM restaurants WHERE id=$1', [id]);
+
+    await audit(
+        isAdmin ? 'admin' : uid,
+        'review_deleted',
+        { restaurantId: id },
+        ipHash(req)
+    );
+
+    return NextResponse.json({ ok: true });
+}
 async function h_reviews_id_view_POST(
     req: NextRequest,
     { params }: { params: Promise<{ id: string }> }
@@ -789,6 +837,48 @@ async function h_reviews_id_view_POST(
         counted,
         viewCount: row?.view_count ?? 0,
     });
+}
+
+    // ==================== ROUTE: reviews/:id (DELETE — ลบรีวิว) ====================
+async function h_reviews_id_DELETE(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id))
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+
+    const uid = getUserId(req);
+    const isAdmin = isAdminReq(req);
+
+    if (!uid && !isAdmin)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+
+    // ตรวจสอบเจ้าของรีวิว
+    const owners = await query<{ reviewer_id: string | null }>(
+        'SELECT reviewer_id FROM restaurants WHERE id=$1',
+        [id]
+    );
+    if (!owners[0])
+        return NextResponse.json({ error: 'not found' }, { status: 404 });
+
+    if (owners[0].reviewer_id !== uid && !isAdmin) {
+        return NextResponse.json(
+            { error: 'คุณไม่ใช่เจ้าของรีวิวนี้' },
+            { status: 403 }
+        );
+    }
+
+    await query('DELETE FROM restaurants WHERE id=$1', [id]);
+
+    await audit(
+        isAdmin ? 'admin' : uid,
+        'review_deleted',
+        { restaurantId: id },
+        ipHash(req)
+    );
+
+    return NextResponse.json({ ok: true });
 }
 
 // ==================== ROUTE: sponsorships ====================
@@ -1483,7 +1573,31 @@ async function dispatch(
                 params: Promise.resolve({ id: path[1] }),
             });
         }
+                // DELETE /api/reviews/:id
+        if (
+            method === 'DELETE' &&
+            path.length === 2 &&
+            path[0] === 'reviews'
+        ) {
+            return await h_reviews_id_DELETE(req, {
+                params: Promise.resolve({ id: path[1] }),
+            });
+        }
+
                 // PATCH /api/reviews/:id
+                // DELETE /api/reviews/:id
+if (
+    method === 'DELETE' &&
+    path.length === 2 &&
+    path[0] === 'reviews'
+) {
+    return await h_reviews_id_DELETE(req, {
+        params: Promise.resolve({ id: path[1] }),
+    });
+}
+export async function DELETE(req: NextRequest, ctx: RouteCtx) {
+    return dispatch(req, ctx, 'DELETE');
+}
         if (
             method === 'PATCH' &&
             path.length === 2 &&
@@ -1581,7 +1695,9 @@ export async function POST(req: NextRequest, ctx: RouteCtx) {
 export async function PATCH(req: NextRequest, ctx: RouteCtx) {
     return dispatch(req, ctx, 'PATCH');
 }
-
+export async function DELETE(req: NextRequest, ctx: RouteCtx) {
+    return dispatch(req, ctx, 'DELETE');
+}
 
 // ==================== ROUTE: admin/review_requests (GET — ดูคำขอทั้งหมด) ====================
 async function h_admin_review_requests_GET(req: NextRequest) {

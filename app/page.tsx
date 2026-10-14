@@ -684,6 +684,38 @@ export default function Home() {
             mediaItems: parseMediaItems(r.media_items),
         });
     };
+    const handleDeleteReview = async (reviewId: string, name: string) => {
+    const confirmed = window.confirm(
+        `ต้องการลบรีวิว "${name}" ใช่หรือไม่?\n\nการลบไม่สามารถเรียกคืนได้`
+    );
+    if (!confirmed) return;
+
+    const r = await api<{ error?: string }>(`/api/reviews/${reviewId}`, {
+        method: 'DELETE',
+    });
+    if (!r.ok) {
+        showToast(`❌ ${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
+        return;
+    }
+    showToast('✓ ลบรีวิวสำเร็จ');
+    await refreshReviews();
+};
+    const handleDeleteReview = async (reviewId: string, name: string) => {
+    const confirmed = window.confirm(
+        `ต้องการลบรีวิว "${name}" ใช่หรือไม่?\n\nการลบไม่สามารถเรียกคืนได้`
+    );
+    if (!confirmed) return;
+
+    const r = await api<{ error?: string }>(`/api/reviews/${reviewId}`, {
+        method: 'DELETE',
+    });
+    if (!r.ok) {
+        showToast(`❌ ${r.data?.error ?? 'ลบไม่สำเร็จ'}`);
+        return;
+    }
+    showToast('✓ ลบรีวิวสำเร็จ');
+    await refreshReviews();
+};
 
     const handleUpdateReview = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -2272,6 +2304,70 @@ export default function Home() {
                                         📨 ส่งคำขอ
                                     </button>
                                 </div>
+                                <div className="flex gap-1.5">
+                                  <div className="flex gap-1.5">
+    <button
+        onClick={(e) => {
+            e.stopPropagation();
+            openEditReview(res);
+        }}
+        className="flex-1 text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 py-2 rounded-lg cursor-pointer transition"
+    >
+        ✏️ แก้ไข
+    </button>
+    <button
+        onClick={(e) => {
+            e.stopPropagation();
+            openRequestModal(res);
+        }}
+        className="flex-1 text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 py-2 rounded-lg cursor-pointer transition"
+    >
+        📨 ส่งคำขอ
+    </button>
+    {isAdmin && (
+        <button
+            onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteReview(res.id, res.name);
+            }}
+            className="text-[11px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
+            title="ลบรีวิว (Admin)"
+        >
+            🗑️
+        </button>
+    )}
+</div>
+    <button
+        onClick={(e) => {
+            e.stopPropagation();
+            openEditReview(res);
+        }}
+        className="flex-1 text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 py-2 rounded-lg cursor-pointer transition"
+    >
+        ✏️ แก้ไข
+    </button>
+    <button
+        onClick={(e) => {
+            e.stopPropagation();
+            openRequestModal(res);
+        }}
+        className="flex-1 text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 py-2 rounded-lg cursor-pointer transition"
+    >
+        📨 ส่งคำขอ
+    </button>
+    {isAdmin && (
+        <button
+            onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteReview(res.id, res.name);
+            }}
+            className="text-[11px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
+            title="ลบรีวิว (Admin)"
+        >
+            🗑️
+        </button>
+    )}
+</div>
                             </div>
                         </article>
                     );
