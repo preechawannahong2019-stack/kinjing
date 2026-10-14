@@ -248,8 +248,9 @@ export default function Home() {
         pending: 0,
     });
 
-    // --- VIP ---
+        // --- VIP ---
     const [showVipModal, setShowVipModal] = useState(false);
+    const [mobileMenuOpen, setMobileMenuOpen] = useState(false);  ← ✅ อยู่แล้ว!
     const [checkout, setCheckout] = useState<Checkout | null>(null);
     const [checkoutState, setCheckoutState] = useState<
         'waiting' | 'succeeded' | 'failed'
@@ -1043,7 +1044,7 @@ export default function Home() {
             )}
 
             {/* Header */}
-            <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
+                                  <header className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
                 <div>
                     <div className="flex items-center gap-2.5">
                         <span className="text-2xl">🍜</span>
@@ -1058,7 +1059,9 @@ export default function Home() {
                         คอมมูนิตี้รีวิวร้านอร่อย ปลอดหน้าม้า • รายได้แบ่งตามยอดวิว
                     </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2.5 justify-end">
+
+                {/* 🖥️ Desktop — แสดงทุกอย่าง */}
+                <div className="hidden md:flex flex-wrap items-center gap-2.5 justify-end">
                     {membership.isVip ? (
                         <span className="inline-block text-xs font-black px-3 py-1 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 shadow">
                             สมาชิก VIP • ไม่มีโฆษณา • ถึง{' '}
@@ -1096,7 +1099,168 @@ export default function Home() {
                         </button>
                     )}
                 </div>
+
+                {/* 📱 Mobile — ปุ่ม Hamburger */}
+                <button
+                    onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    className="md:hidden absolute top-4 right-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white w-11 h-11 rounded-xl flex items-center justify-center cursor-pointer shadow-lg z-10"
+                    aria-label="Menu"
+                >
+                    {mobileMenuOpen ? '✕' : '☰'}
+                </button>
             </header>
+
+            {/* 📱 Mobile Menu Drawer */}
+            {mobileMenuOpen && (
+                <div
+                    className="md:hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-40"
+                    onClick={() => setMobileMenuOpen(false)}
+                >
+                    <div
+                        className="absolute top-0 right-0 w-72 h-full bg-slate-900 border-l border-slate-800 p-5 space-y-3 shadow-2xl overflow-y-auto"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                            <h3 className="text-sm font-bold text-white">
+                                เมนู
+                            </h3>
+                            <button
+                                onClick={() => setMobileMenuOpen(false)}
+                                className="text-slate-400 hover:text-white cursor-pointer text-lg"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="py-2">
+                            {membership.isVip ? (
+                                <span className="block text-xs font-black px-3 py-2 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 text-center">
+                                    สมาชิก VIP • ถึง{' '}
+                                    {fmtDate(membership.periodEnd)}
+                                </span>
+                            ) : (
+                                <span className="block text-xs font-bold px-3 py-2 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-center">
+                                    ผู้ใช้ฟรี (เห็นสปอนเซอร์)
+                                </span>
+                            )}
+                        </div>
+
+                        <button
+                            onClick={() => {
+                                setShowVipModal(true);
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            {membership.isVip ? 'ต่ออายุ VIP' : '⭐ สมัคร VIP'}
+                        </button>
+
+                        <button
+                            onClick={() => {
+                                setShowAddForm(true);
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            + เขียนรีวิวใหม่
+                        </button>
+
+                        <hr className="border-slate-800" />
+
+                        <button
+                            onClick={() => {
+                                if (isAdmin) {
+                                    handleAdminLogout();
+                                } else {
+                                    setShowLogin(true);
+                                }
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            {isAdmin ? '🚪 ออกจากแอดมิน' : '🔒 Admin Login'}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* 📱 Mobile Menu Drawer */}
+            {mobileMenuOpen && (
+                <div
+                    className="md:hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-40"
+                    onClick={() => setMobileMenuOpen(false)}
+                >
+                    <div
+                        className="absolute top-0 right-0 w-72 h-full bg-slate-900 border-l border-slate-800 p-5 space-y-3 shadow-2xl overflow-y-auto"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                            <h3 className="text-sm font-bold text-white">
+                                เมนู
+                            </h3>
+                            <button
+                                onClick={() => setMobileMenuOpen(false)}
+                                className="text-slate-400 hover:text-white cursor-pointer text-lg"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* สถานะสมาชิก */}
+                        <div className="py-2">
+                            {membership.isVip ? (
+                                <span className="block text-xs font-black px-3 py-2 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 text-center">
+                                    สมาชิก VIP • ถึง{' '}
+                                    {fmtDate(membership.periodEnd)}
+                                </span>
+                            ) : (
+                                <span className="block text-xs font-bold px-3 py-2 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-center">
+                                    ผู้ใช้ฟรี (เห็นสปอนเซอร์)
+                                </span>
+                            )}
+                        </div>
+
+                        {/* ปุ่มสมัคร VIP */}
+                        <button
+                            onClick={() => {
+                                setShowVipModal(true);
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            {membership.isVip ? 'ต่ออายุ VIP' : '⭐ สมัคร VIP'}
+                        </button>
+
+                        {/* ปุ่มเขียนรีวิว */}
+                        <button
+                            onClick={() => {
+                                setShowAddForm(true);
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            + เขียนรีวิวใหม่
+                        </button>
+
+                        <hr className="border-slate-800" />
+
+                        {/* Admin */}
+                        <button
+                            onClick={() => {
+                                if (isAdmin) {
+                                    handleAdminLogout();
+                                } else {
+                                    setShowLogin(true);
+                                }
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            {isAdmin ? '🚪 ออกจากแอดมิน' : '🔒 Admin Login'}
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* My Earnings */}
             {membership.isVip &&
@@ -1139,108 +1303,8 @@ export default function Home() {
                 )}
 
             {/* Admin Console */}
-            {isAdmin && (
-                <section className="bg-rose-950/30 border-2 border-rose-500/50 rounded-2xl p-4 space-y-3 shadow-xl">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                        <span className="text-xs font-black uppercase text-rose-400">
-                            Admin Console
-                        </span>
-                        <div className="flex flex-wrap gap-2">
-                            <button
-                                onClick={() =>
-                                    setShowSponsorManager(!showSponsorManager)
-                                }
-                                className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
-                            >
-                                {showSponsorManager ? 'ปิด' : 'จัดการสปอนเซอร์'}
-                            </button>
-                            <button
-                                onClick={() =>
-                                    setShowPayoutManager(!showPayoutManager)
-                                }
-                                className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
-                            >
-                                {showPayoutManager ? 'ปิด' : 'จ่ายรางวัล'}
-                            </button>
-                            <button
-                                onClick={() => setShowLogs(!showLogs)}
-                                className="bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 font-bold text-xs px-3.5 py-2 rounded-xl cursor-pointer"
-                            >
-                                Audit Logs
-                            </button>
-                            <button
-                                onClick={() =>
-                                    setShowReviewRequests(!showReviewRequests)
-                                }
-                                className="bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/40 text-violet-200 font-bold text-xs px-3.5 py-2 rounded-xl cursor-pointer relative"
-                            >
-                                📝 คำขอแก้ไข
-                                {reviewRequestCounts.pending > 0 && (
-                                    <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center">
-                                        {reviewRequestCounts.pending}
-                                    </span>
-                                )}
-                            </button>
-                            <button
-                                onClick={loadSummary}
-                                className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs px-3.5 py-2 rounded-xl cursor-pointer"
-                            >
-                                รีเฟรช
-                            </button>
-                        </div>
-                    </div>
-                    {summary ? (
-                        <>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                {[
-                                    {
-                                        label: 'รายได้ VIP',
-                                        value: baht(
-                                            summary.revenue.subscriptionsSatang
-                                        ),
-                                    },
-                                    {
-                                        label: 'รายได้สปอนเซอร์',
-                                        value: baht(
-                                            summary.revenue
-                                                .sponsorshipInvoicesSatang
-                                        ),
-                                    },
-                                    {
-                                        label: 'รายได้รวม',
-                                        value: baht(summary.revenue.totalSatang),
-                                    },
-                                    {
-                                        label: 'จ่ายรางวัลแล้ว',
-                                        value: baht(
-                                            summary.revenue.payoutsPaidSatang
-                                        ),
-                                    },
-                                ].map((s) => (
-                                    <div
-                                        key={s.label}
-                                        className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl"
-                                    >
-                                        <span className="text-[10px] text-indigo-300 block">
-                                            {s.label}
-                                        </span>
-                                        <span className="text-base font-black text-indigo-400">
-                                            {s.value}
-                                        </span>
-                                    </div>
-                                ))}
-                            </div>
-                            <div className="text-xs text-slate-400">
-                                สมาชิก VIP ที่ใช้งานอยู่: {summary.activeSubscribers} คน
-                            </div>
-                        </>
-                    ) : (
-                        <p className="text-xs text-slate-400">
-                            กำลังโหลดข้อมูล...
-                        </p>
-                    )}
-                </section>
-            )}
+                        {isAdmin && (
+                <section className="hidden md:block bg-rose-950/30 border-2 border-rose-500/50 rounded-2xl p-4 space-y-3 shadow-xl"></section>
 
             {/* Sponsor Manager */}
             {isAdmin && showSponsorManager && summary && (
@@ -1981,10 +2045,10 @@ export default function Home() {
                 </section>
             )}
 
-            {/* Sponsorship Banner */}
+                        {/* Sponsorship Banner */}
             {sponsorship && !membership.isVip && (
-                <section className="bg-gradient-to-r from-amber-950/70 via-slate-900 to-orange-950/60 border-2 border-amber-500/50 rounded-2xl p-5 shadow-xl">
-                    <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <section className="bg-gradient-to-r from-amber-950/70 via-slate-900 to-orange-950/60 border-2 border-amber-500/50 rounded-2xl p-4 md:p-5 shadow-xl">
+                    <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 md:gap-4">
                         <div className="space-y-1.5 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                                 <span className="text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full bg-amber-500 text-slate-950">
@@ -1994,7 +2058,7 @@ export default function Home() {
                                     {sponsorship.brand_name}
                                 </span>
                             </div>
-                            <h3 className="text-base md:text-lg font-extrabold text-white">
+                            <h3 className="text-sm md:text-base lg:text-lg font-extrabold text-white">
                                 {sponsorship.headline}
                             </h3>
                             {sponsorship.sub_text && (
@@ -2002,8 +2066,15 @@ export default function Home() {
                                     {sponsorship.sub_text}
                                 </p>
                             )}
+                            {sponsorship.restaurant_name && (
+                                <p className="text-[11px] text-amber-400">
+                                    ร้าน: {sponsorship.restaurant_name}
+                                </p>
+                            )}
                         </div>
-                        <div className="flex flex-col gap-2 shrink-0">
+
+                        {/* 🖥️ Desktop — แสดงปุ่ม */}
+                        <div className="hidden md:flex flex-col gap-2 shrink-0">
                             <a
                                 href={sponsorship.target_url}
                                 target="_blank"
@@ -2019,9 +2090,27 @@ export default function Home() {
                                 ปิดสปอนเซอร์ด้วยแพ็กเกจ VIP
                             </button>
                         </div>
+
+                        {/* 📱 Mobile — แสดงปุ่มขนาดเล็ก */}
+                        <div className="flex md:hidden w-full gap-2 pt-1">
+                            <a
+                                href={sponsorship.target_url}
+                                target="_blank"
+                                rel="noopener noreferrer nofollow sponsored"
+                                className="flex-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-[11px] px-3 py-2 rounded-xl shadow-md transition text-center"
+                            >
+                                {sponsorship.cta_text}
+                            </a>
+                            <button
+                                onClick={() => setShowVipModal(true)}
+                                className="text-[10px] text-amber-300 hover:underline cursor-pointer whitespace-nowrap px-2"
+                            >
+                                ปิด VIP
+                            </button>
+                        </div>
                     </div>
                 </section>
-            )}
+            )}ฌ
 
             {/* Reviews Header */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-2xl">
