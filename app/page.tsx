@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { upload as blobUpload } from '@vercel/blob/client';
 
 // ==================== Types ====================
 interface Plan {
@@ -118,6 +119,67 @@ function detectInApp(ua: string): boolean {
 }
 
 const isMobileUA = (ua: string) => /Android|iPhone|iPad|iPod/i.test(ua);
+
+// ==================== Media upload helpers ====================
+const MAX_VIDEO_MB = 200;
+
+/** ย่อรูปในเบราว์เซอร์ก่อนอัปโหลด (กว้าง/สูงไม่เกิน 1920px, JPEG 85%) */
+async function compressImage(file: File): Promise<File> {
+    if (!file.type.startsWith('image/') || file.type === 'image/gif') return file;
+    try {
+        const bitmap = await createImageBitmap(file);
+        const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height));
+        const w = Math.round(bitmap.width * scale);
+        const h = Math.round(bitmap.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return file;
+        ctx.drawImage(bitmap, 0, 0, w, h);
+        bitmap.close?.();
+        const blob = await new Promise<Blob | null>((res) =>
+            canvas.toBlob(res, 'image/jpeg', 0.85)
+        );
+        if (!blob || blob.size >= file.size) return file;
+        const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+        return new File([blob], name, { type: 'image/jpeg' });
+    } catch {
+        return file; // เช่น HEIC ที่เบราว์เซอร์อ่านไม่ได้ → อัปโหลดไฟล์เดิม
+    }
+}
+
+/** อัปโหลดตรงจากเบราว์เซอร์ไป Vercel Blob (ไม่ติดลิมิต 4.5MB, รองรับวิดีโอ) */
+async function uploadMedia(original: File): Promise<MediaItem> {
+    const isVideo = original.type.startsWith('video/');
+    if (!isVideo && !original.type.startsWith('image/'))
+        throw new Error(`ไฟล์ ${original.name} ไม่ใช่รูปภาพหรือวิดีโอ`);
+    if (isVideo && original.size > MAX_VIDEO_MB * 1024 * 1024)
+        throw new Error(`วิดีโอใหญ่เกิน ${MAX_VIDEO_MB}MB`);
+
+    const file = isVideo ? original : await compressImage(original);
+    const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-60) || 'file';
+    try {
+        const blob = await blobUpload(`kinjing/${Date.now()}-${safe}`, file, {
+            access: 'public',
+            handleUploadUrl: '/api/upload',
+            contentType: file.type || undefined,
+            multipart: file.size > 8 * 1024 * 1024,
+        });
+        return { type: isVideo ? 'video' : 'image', url: blob.url };
+    } catch (err) {
+        // ดึงข้อความจากเซิร์ฟเวอร์ (เช่น ยังไม่ได้ต่อ Blob)
+        const probe = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+        }).catch(() => null);
+        const data = probe ? await probe.json().catch(() => null) : null;
+        if (probe?.status === 503 && data?.error) throw new Error(data.error);
+        console.error(err);
+        throw new Error(`อัพโหลด ${original.name} ไม่สำเร็จ`);
+    }
+}
 
 declare global {
     interface Window {
@@ -382,7 +444,7 @@ export default function Home() {
     } | null>(null);
     const [showAddForm, setShowAddForm] = useState(false);
     const [newName, setNewName] = useState('');
-    const [newCategory, setNewCategory] = useState('สตรีทฟู้ดร้านลับ');
+    const [newCategory, setNewCategory] = useState(FOOD_CATEGORIES[0]);
     const [newMustTry, setNewMustTry] = useState('');
     const [newMedia, setNewMedia] = useState<MediaItem[]>([]);
     const [uploading, setUploading] = useState(false);
@@ -422,7 +484,7 @@ export default function Home() {
     const [editingReview, setEditingReview] = useState<Review | null>(null);
     const [editReviewForm, setEditReviewForm] = useState({
         name: '',
-        category: 'สตรีทฟู้ดร้านลับ',
+        category: FOOD_CATEGORIES[0],
         mustTry: '',
         mediaItems: [] as MediaItem[],
     });
@@ -1146,29 +1208,15 @@ export default function Home() {
             const newItems: MediaItem[] = [];
 
             for (const file of toAdd) {
-                const formData = new FormData();
-                formData.append('file', file);
-
-                const res = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData,
-                });
-
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    showToast(`${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
-                    continue;
+                try {
+                    newItems.push(await uploadMedia(file));
+                } catch (err) {
+                    showToast(err instanceof Error ? err.message : 'อัพโหลดไม่สำเร็จ');
                 }
-
-                const data = await res.json();
-                newItems.push({
-                    type: data.type,
-                    url: data.url,
-                });
             }
 
             setNewMedia((prev) => [...prev, ...newItems]);
-            showToast(`อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
+            if (newItems.length > 0) showToast(`อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
         } catch (err) {
             console.error(err);
             showToast('อัพโหลดไม่สำเร็จ');
@@ -1197,32 +1245,18 @@ export default function Home() {
             const newItems: MediaItem[] = [];
 
             for (const file of toAdd) {
-                const formData = new FormData();
-                formData.append('file', file);
-
-                const res = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData,
-                });
-
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    showToast(`${err.error ?? 'อัพโหลดไม่สำเร็จ'}`);
-                    continue;
+                try {
+                    newItems.push(await uploadMedia(file));
+                } catch (err) {
+                    showToast(err instanceof Error ? err.message : 'อัพโหลดไม่สำเร็จ');
                 }
-
-                const data = await res.json();
-                newItems.push({
-                    type: data.type,
-                    url: data.url,
-                });
             }
 
             setEditReviewForm((f) => ({
                 ...f,
                 mediaItems: [...f.mediaItems, ...newItems],
             }));
-            showToast(`อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
+            if (newItems.length > 0) showToast(`อัพโหลด ${newItems.length} ไฟล์สำเร็จ`);
         } catch (err) {
             console.error(err);
             showToast('อัพโหลดไม่สำเร็จ');
@@ -2470,11 +2504,11 @@ export default function Home() {
                             onChange={(e) => setNewCategory(e.target.value)}
                             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
                         >
-                            <option value="สตรีทฟู้ดร้านลับ">
-                                สตรีทฟู้ดร้านลับ
-                            </option>
-                            <option value="เดตสุดพิเศษ">เดตสุดพิเศษ</option>
-                            <option value="คาเฟ่นั่งทำงาน">คาเฟ่นั่งทำงาน</option>
+                            {FOOD_CATEGORIES.map((c) => (
+                                <option key={c} value={c}>
+                                    {c}
+                                </option>
+                            ))}
                         </select>
                     </div>
 
@@ -2984,15 +3018,17 @@ export default function Home() {
                                     })
                                 }
                             >
-                                <option value="สตรีทฟู้ดร้านลับ">
-                                    สตรีทฟู้ดร้านลับ
-                                </option>
-                                <option value="เดตสุดพิเศษ">
-                                    เดตสุดพิเศษ
-                                </option>
-                                <option value="คาเฟ่นั่งทำงาน">
-                                    คาเฟ่นั่งทำงาน
-                                </option>
+                                {editReviewForm.category &&
+                                    !FOOD_CATEGORIES.includes(editReviewForm.category) && (
+                                        <option value={editReviewForm.category}>
+                                            {editReviewForm.category} (เดิม)
+                                        </option>
+                                    )}
+                                {FOOD_CATEGORIES.map((c) => (
+                                    <option key={c} value={c}>
+                                        {c}
+                                    </option>
+                                ))}
                             </select>
                         </div>
                         <input
@@ -3140,9 +3176,8 @@ export default function Home() {
                                     })
                                 }
                             />
-                            <input
+                            <select
                                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
-                                placeholder="หมวดใหม่"
                                 value={requestProposed.category}
                                 onChange={(e) =>
                                     setRequestProposed({
@@ -3150,7 +3185,14 @@ export default function Home() {
                                         category: e.target.value,
                                     })
                                 }
-                            />
+                            >
+                                <option value="">หมวดอาหารใหม่ (ไม่เปลี่ยน)</option>
+                                {FOOD_CATEGORIES.map((c) => (
+                                    <option key={c} value={c}>
+                                        {c}
+                                    </option>
+                                ))}
+                            </select>
                             <input
                                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
                                 placeholder="เมนูต้องลองใหม่"
