@@ -15,6 +15,7 @@ interface Membership {
     isVip: boolean;
     planId: string | null;
     periodEnd: string | null;
+    tier?: 'free' | 'basic' | 'premium';
 }
 
 interface MeResponse {
@@ -62,6 +63,118 @@ interface Review {
     longitude: number | null;
     address: string | null;
     recommender_name: string | null;
+    rating_count?: number;
+    boosted?: boolean;
+    is_mine?: boolean;
+    my_score?: number | null;
+    promotions?: Promotion[];
+}
+
+interface Promotion {
+    id: string;
+    title: string;
+    description: string | null;
+    coupon_code: string | null;
+    discount_text: string | null;
+    ends_at: string;
+}
+
+// ==================== Categories / Sharing / In-app ====================
+const NEAR_ME = '📍 ใกล้ฉัน';
+const ALL_TAB = 'ทั้งหมด';
+const FOOD_CATEGORIES = [
+    'อาหารภาคกลาง',
+    'อาหารเหนือ',
+    'อาหารใต้',
+    'อาหารอีสาน',
+    'อาหารจีน',
+    'อาหารต่างชาติ',
+];
+const NEAR_ME_RADIUS_KM = 10;
+
+const RATING_LABELS: Record<number, string> = {
+    5: 'อร่อยที่สุด',
+    4: 'อร่อย',
+    3: 'พอใช้',
+    2: 'ไม่ค่อยอร่อย',
+    1: 'ไม่อร่อยที่สุด',
+};
+
+function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/** ตรวจว่าเปิดใน in-app browser (LINE / Facebook / Messenger / Instagram / X / TikTok) */
+function detectInApp(ua: string): boolean {
+    return /\bLine\/|FBAN|FBAV|FB_IAB|Messenger|Instagram|Twitter|TikTok|musical_ly|KAKAOTALK/i.test(
+        ua
+    );
+}
+
+const isMobileUA = (ua: string) => /Android|iPhone|iPad|iPod/i.test(ua);
+
+declare global {
+    interface Window {
+        turnstile?: {
+            render: (
+                el: HTMLElement,
+                opts: {
+                    sitekey: string;
+                    callback: (token: string) => void;
+                    'expired-callback'?: () => void;
+                    theme?: string;
+                }
+            ) => string;
+            remove: (id: string) => void;
+        };
+    }
+}
+
+const TURNSTILE_SITE_KEY = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? '';
+const FB_APP_ID = process.env.NEXT_PUBLIC_FB_APP_ID ?? '';
+
+function TurnstileBox({ onToken }: { onToken: (t: string | null) => void }) {
+    const ref = React.useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!TURNSTILE_SITE_KEY || !ref.current) return;
+        let widgetId: string | null = null;
+        let cancelled = false;
+        const render = () => {
+            if (cancelled || !ref.current || !window.turnstile) return;
+            widgetId = window.turnstile.render(ref.current, {
+                sitekey: TURNSTILE_SITE_KEY,
+                theme: 'dark',
+                callback: (t) => onToken(t),
+                'expired-callback': () => onToken(null),
+            });
+        };
+        if (window.turnstile) render();
+        else {
+            const id = 'cf-turnstile-script';
+            let s = document.getElementById(id) as HTMLScriptElement | null;
+            if (!s) {
+                s = document.createElement('script');
+                s.id = id;
+                s.src =
+                    'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+                s.async = true;
+                document.head.appendChild(s);
+            }
+            s.addEventListener('load', render);
+        }
+        return () => {
+            cancelled = true;
+            if (widgetId && window.turnstile) window.turnstile.remove(widgetId);
+        };
+    }, [onToken]);
+    if (!TURNSTILE_SITE_KEY) return null;
+    return <div ref={ref} className="flex justify-center min-h-[65px]" />;
 }
 
 interface AdminReviewRequest {
@@ -359,6 +472,46 @@ export default function Home() {
     const showToast = useCallback((msg: string) => {
         setToast(msg);
         setTimeout(() => setToast(null), 4000);
+    }, []);
+
+    // --- In-app browser / deep link ---
+    const [isInApp, setIsInApp] = useState(false);
+    const [deepLinkId, setDeepLinkId] = useState<string | null>(null);
+
+    // --- Near me ---
+    const [myPos, setMyPos] = useState<{ lat: number; lng: number } | null>(
+        null
+    );
+    const [locatingMe, setLocatingMe] = useState(false);
+
+    // --- Rating ---
+    const [ratingFor, setRatingFor] = useState<Review | null>(null);
+    const [ratingScore, setRatingScore] = useState(0);
+    const [ratingOpenedAt, setRatingOpenedAt] = useState(0);
+    const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+    const [ratingHp, setRatingHp] = useState('');
+    const [submittingRating, setSubmittingRating] = useState(false);
+
+    // --- Share sheet ---
+    const [shareFor, setShareFor] = useState<Review | null>(null);
+
+    // --- Premium: promotion ---
+    const [promoFor, setPromoFor] = useState<Review | null>(null);
+    const [promoForm, setPromoForm] = useState({
+        title: '',
+        description: '',
+        couponCode: '',
+        discountText: '',
+        days: '7',
+    });
+
+    const tier = membership.tier ?? (membership.isVip ? 'basic' : 'free');
+
+    useEffect(() => {
+        setIsInApp(detectInApp(navigator.userAgent));
+        const params = new URLSearchParams(window.location.search);
+        const fromHash = window.location.hash.match(/^#review-(.+)$/)?.[1];
+        setDeepLinkId(params.get('review') ?? fromHash ?? null);
     }, []);
 
 // === วางส่วนที่ 2 ต่อจากตรงนี้ ===
@@ -671,28 +824,226 @@ export default function Home() {
     };
 
     // ==================== Review: Share ====================
-    const shareReview = async (review: Review) => {
-        const url = `${window.location.origin}/#review-${review.id}`;
-        const text = `\u{1F35C} ${review.name}\n\u2B50 ${review.rating}\n\u{1F4CD} ${review.must_try}\n\nดูรีวิวเต็ม: `;
+    const shareUrlOf = (review: Review) =>
+        `${window.location.origin}/?review=${review.id}`;
+    const shareTextOf = (review: Review) =>
+        `\u{1F35C} ${review.name}\n\u2B50 ${Number(review.rating).toFixed(1)}\n\u{1F37D} ${review.must_try}`;
 
-        if (navigator.share) {
-            try {
-                await navigator.share({
-                    title: review.name,
-                    text: text,
-                    url: url,
-                });
-                showToast('แชร์สำเร็จ');
-            } catch (err) {
-                // user cancelled
+    const shareReview = (review: Review) => setShareFor(review);
+
+    const shareTo = async (
+        platform: 'line' | 'messenger' | 'x' | 'instagram' | 'native',
+        review: Review
+    ) => {
+        const url = shareUrlOf(review);
+        const text = shareTextOf(review);
+        const u = encodeURIComponent(url);
+        const t = encodeURIComponent(text);
+        const ua = navigator.userAgent;
+        const mobile = isMobileUA(ua);
+        let target = '';
+
+        switch (platform) {
+            case 'line':
+                target = mobile
+                    ? `https://line.me/R/share?text=${encodeURIComponent(`${text}\n${url}`)}`
+                    : `https://social-plugins.line.me/lineit/share?url=${u}&text=${t}`;
+                break;
+            case 'messenger':
+                target = mobile
+                    ? `fb-messenger://share/?link=${u}`
+                    : FB_APP_ID
+                    ? `https://www.facebook.com/dialog/send?app_id=${FB_APP_ID}&link=${u}&redirect_uri=${u}`
+                    : `https://www.facebook.com/sharer/sharer.php?u=${u}`;
+                break;
+            case 'x':
+                target = `https://twitter.com/intent/tweet?text=${t}&url=${u}`;
+                break;
+            case 'instagram':
+            case 'native': {
+                // Instagram ไม่มี share URL สาธารณะ → ใช้ Share Sheet ของระบบ (เลือก Instagram/Direct/Story ได้ทันที)
+                if (navigator.share) {
+                    try {
+                        const cover = parseMediaItems(review.media_items).find(
+                            (m) => m.type === 'image'
+                        );
+                        let files: File[] | undefined;
+                        if (cover && platform === 'instagram') {
+                            const blob = await fetch(cover.url)
+                                .then((r) => (r.ok ? r.blob() : null))
+                                .catch(() => null);
+                            if (blob) {
+                                const f = new File([blob], 'kinjing.jpg', {
+                                    type: blob.type || 'image/jpeg',
+                                });
+                                if (navigator.canShare?.({ files: [f] })) files = [f];
+                            }
+                        }
+                        await navigator.share({
+                            title: review.name,
+                            text: `${text}\n${url}`,
+                            url,
+                            ...(files ? { files } : {}),
+                        });
+                        setShareFor(null);
+                    } catch {
+                        // ผู้ใช้ยกเลิก
+                    }
+                    return;
+                }
+                if (platform === 'instagram') {
+                    target = mobile ? 'instagram://direct-inbox' : 'https://www.instagram.com/direct/inbox/';
+                    try {
+                        await navigator.clipboard.writeText(`${text}\n${url}`);
+                    } catch {
+                        /* ignore */
+                    }
+                    showToast('เปิด Instagram แล้ว วางข้อความได้ทันที');
+                }
+                break;
             }
+        }
+        if (!target) return;
+        if (target.startsWith('http')) {
+            window.open(target, '_blank', 'noopener,noreferrer');
         } else {
-            try {
-                await navigator.clipboard.writeText(text + url);
-                showToast('คัดลอกลิงก์แล้ว');
-            } catch {
-                showToast('ไม่สามารถแชร์ได้');
-            }
+            window.location.href = target;
+        }
+        setShareFor(null);
+    };
+
+    // ==================== Near me ====================
+    const locateMe = useCallback(() => {
+        if (!navigator.geolocation) {
+            showToast('เบราว์เซอร์ไม่รองรับ GPS');
+            return;
+        }
+        setLocatingMe(true);
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                setMyPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+                setLocatingMe(false);
+            },
+            () => {
+                setLocatingMe(false);
+                showToast('ไม่สามารถดึงตำแหน่งได้ กรุณาอนุญาตสิทธิ์ตำแหน่ง');
+                setActiveTab(ALL_TAB);
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+        );
+    }, [showToast]);
+
+    const selectTab = (c: string) => {
+        setActiveTab(c);
+        if (c === NEAR_ME && !myPos) locateMe();
+    };
+
+    // ==================== Rating ====================
+    const openRating = (review: Review) => {
+        if (tier === 'free') {
+            showToast('ให้คะแนนได้เฉพาะสมาชิก — สมัครสมาชิกเพื่อร่วมสร้างรายได้');
+            setShowVipModal(true);
+            return;
+        }
+        if (review.is_mine) {
+            showToast('ไม่สามารถให้คะแนนรีวิวของตัวเองได้');
+            return;
+        }
+        setRatingFor(review);
+        setRatingScore(0);
+        setTurnstileToken(null);
+        setRatingHp('');
+        setRatingOpenedAt(Date.now());
+    };
+
+    const submitRating = async () => {
+        if (!ratingFor || ratingScore < 1) return;
+        if (TURNSTILE_SITE_KEY && !turnstileToken) {
+            showToast('กรุณายืนยันว่าคุณไม่ใช่บอท');
+            return;
+        }
+        setSubmittingRating(true);
+        const r = await api<{
+            error?: string;
+            rating: number;
+            ratingCount: number;
+            myScore: number;
+        }>(`/api/reviews/${ratingFor.id}/rate`, {
+            method: 'POST',
+            body: JSON.stringify({
+                score: ratingScore,
+                turnstileToken,
+                hp: ratingHp,
+                openedAt: ratingOpenedAt,
+            }),
+        });
+        setSubmittingRating(false);
+        if (!r.ok || !r.data) {
+            showToast(r.data?.error ?? 'ให้คะแนนไม่สำเร็จ');
+            setTurnstileToken(null);
+            return;
+        }
+        const { rating, ratingCount, myScore } = r.data;
+        const id = ratingFor.id;
+        setReviews((prev) =>
+            prev.map((x) =>
+                x.id === id
+                    ? { ...x, rating, rating_count: ratingCount, my_score: myScore }
+                    : x
+            )
+        );
+        setRatingFor(null);
+        showToast('ขอบคุณสำหรับคะแนน!');
+    };
+
+    const onTurnstileToken = useCallback(
+        (t: string | null) => setTurnstileToken(t),
+        []
+    );
+
+    // ==================== Premium: boost & promotion ====================
+    const boostReview = async (review: Review) => {
+        const r = await api<{ error?: string }>(
+            `/api/reviews/${review.id}/boost`,
+            { method: 'POST' }
+        );
+        if (!r.ok) {
+            showToast(r.data?.error ?? 'บูสต์ไม่สำเร็จ');
+            return;
+        }
+        showToast('บูสต์การมองเห็น 7 วันแล้ว');
+        await refreshReviews();
+    };
+
+    const submitPromotion = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!promoFor) return;
+        const r = await api<{ error?: string }>('/api/promotions', {
+            method: 'POST',
+            body: JSON.stringify({ ...promoForm, restaurantId: promoFor.id }),
+        });
+        if (!r.ok) {
+            showToast(r.data?.error ?? 'สร้างโปรโมชันไม่สำเร็จ');
+            return;
+        }
+        showToast('สร้างโปรโมชัน/คูปองแล้ว');
+        setPromoFor(null);
+        setPromoForm({ title: '', description: '', couponCode: '', discountText: '', days: '7' });
+        await refreshReviews();
+    };
+
+    const deletePromotion = async (id: string) => {
+        if (!window.confirm('ลบโปรโมชันนี้?')) return;
+        const r = await api(`/api/promotions/${id}`, { method: 'DELETE' });
+        if (r.ok) await refreshReviews();
+    };
+
+    const copyCoupon = async (code: string) => {
+        try {
+            await navigator.clipboard.writeText(code);
+            showToast(`คัดลอกโค้ด ${code} แล้ว`);
+        } catch {
+            showToast(code);
         }
     };
 
@@ -1011,30 +1362,60 @@ export default function Home() {
 
     // ==================== Filter ====================
     const categories = useMemo(() => {
-        const set = new Set(reviews.map((r) => r.category));
-        return ['ทั้งหมด', ...Array.from(set)];
+        const extra = Array.from(new Set(reviews.map((r) => r.category))).filter(
+            (c) => c && !FOOD_CATEGORIES.includes(c)
+        );
+        return [ALL_TAB, NEAR_ME, ...FOOD_CATEGORIES, ...extra];
     }, [reviews]);
 
     const filteredReviews = useMemo(() => {
-        return reviews.filter((r) => {
-            if (activeTab !== 'ทั้งหมด' && r.category !== activeTab)
-                return false;
-            if (searchQuery.trim()) {
-                const q = searchQuery.toLowerCase();
-                return (
-                    r.name.toLowerCase().includes(q) ||
-                    r.must_try.toLowerCase().includes(q) ||
-                    r.reviewer_name.toLowerCase().includes(q)
-                );
-            }
-            return true;
-        });
-    }, [reviews, activeTab, searchQuery]);
+        const list = reviews
+            .map((r) => ({
+                ...r,
+                distance:
+                    myPos && r.latitude != null && r.longitude != null
+                        ? distanceKm(myPos.lat, myPos.lng, Number(r.latitude), Number(r.longitude))
+                        : null,
+            }))
+            .filter((r) => {
+                if (activeTab === NEAR_ME) {
+                    if (r.distance == null || r.distance > NEAR_ME_RADIUS_KM) return false;
+                } else if (activeTab !== ALL_TAB && r.category !== activeTab) {
+                    return false;
+                }
+                if (searchQuery.trim()) {
+                    const q = searchQuery.toLowerCase();
+                    return (
+                        r.name.toLowerCase().includes(q) ||
+                        r.must_try.toLowerCase().includes(q) ||
+                        r.category.toLowerCase().includes(q) ||
+                        (r.address ?? '').toLowerCase().includes(q) ||
+                        r.reviewer_name.toLowerCase().includes(q)
+                    );
+                }
+                return true;
+            });
+        if (activeTab === NEAR_ME)
+            list.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
+        return list;
+    }, [reviews, activeTab, searchQuery, myPos]);
+
+    // เปิดจากลิงก์ที่แชร์ → เลื่อนไปที่รีวิวนั้น + นับวิว
+    useEffect(() => {
+        if (!deepLinkId || reviews.length === 0) return;
+        const el = document.getElementById(`review-${deepLinkId}`);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.classList.add('ring-2', 'ring-amber-400');
+            trackView(deepLinkId);
+        }
+        setDeepLinkId(null);
+    }, [deepLinkId, reviews, trackView]);
 
 // === วางส่วนที่ 3 ต่อจากตรงนี้ ===
     // ==================== Return JSX ====================
     return (
-        <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6 space-y-6">
+        <div className="min-h-screen bg-slate-950 text-slate-100 p-3 sm:p-4 md:p-6 space-y-4 md:space-y-6 overflow-x-hidden">
             {/* Toast */}
             {toast && (
                 <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] bg-slate-800 border border-slate-600 text-white text-sm px-4 py-2.5 rounded-xl shadow-2xl">
@@ -1059,8 +1440,8 @@ export default function Home() {
                     </p>
                 </div>
 
-                {/* Desktop Menu */}
-                <div className="hidden md:flex flex-wrap items-center gap-2.5 justify-end">
+                {/* Desktop Menu (ซ่อนเมื่อเปิดใน LINE/Messenger/IG/X) */}
+                <div className={`${isInApp ? 'hidden' : 'hidden md:flex'} flex-wrap items-center gap-2.5 justify-end`}>
                     {membership.isVip ? (
                         <span className="inline-block text-xs font-black px-3 py-1 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 shadow">
                             สมาชิก VIP • ไม่มีโฆษณา • ถึง{' '}
@@ -1100,6 +1481,7 @@ export default function Home() {
                 </div>
 
                 {/* Mobile Hamburger */}
+                {!isInApp && (
                 <button
                     onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
                     className="md:hidden absolute top-4 right-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white w-11 h-11 rounded-xl flex items-center justify-center cursor-pointer shadow-lg z-10"
@@ -1107,10 +1489,11 @@ export default function Home() {
                 >
                     {mobileMenuOpen ? '✕' : '☰'}
                 </button>
+                )}
             </header>
 
             {/* Mobile Menu Drawer */}
-            {mobileMenuOpen && (
+            {mobileMenuOpen && !isInApp && (
                 <div
                     className="md:hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-40"
                     onClick={() => setMobileMenuOpen(false)}
@@ -1628,12 +2011,12 @@ export default function Home() {
                                 />
                             </label>
                             <label className="text-[10px] text-slate-400 space-y-1">
-                                % แบ่งให้ผู้รีวิว
+                                % แบ่งให้ผู้รีวิว (20–40%)
                                 <input
                                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white"
                                     type="number"
-                                    min="1"
-                                    max="100"
+                                    min="20"
+                                    max="40"
                                     value={payoutForm.sharePercent}
                                     onChange={(e) =>
                                         setPayoutForm({
@@ -1645,6 +2028,9 @@ export default function Home() {
                                 />
                             </label>
                         </div>
+                        <p className="text-[10px] text-slate-500">
+                            สูตร: (วิว ÷ 2,000) × อัตรา 100–200 บาท (ตามคะแนนเฉลี่ย 1★→5★) × ส่วนแบ่ง %
+                        </p>
                         <button
                             type="submit"
                             className="w-full bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold py-2 rounded-lg text-xs cursor-pointer"
@@ -2030,14 +2416,14 @@ export default function Home() {
                     {categories.map((c) => (
                         <button
                             key={c}
-                            onClick={() => setActiveTab(c)}
-                            className={`text-xs px-3 py-1.5 rounded-lg cursor-pointer transition ${
+                            onClick={() => selectTab(c)}
+                            className={`text-xs px-3 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 ${
                                 activeTab === c
-                                    ? 'bg-amber-500 text-slate-950 font-bold'
+                                    ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
                                     : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                             }`}
                         >
-                            {c}
+                            <span>{c === NEAR_ME && locatingMe ? '📍 กำลังหาพิกัด...' : c}</span>
                         </button>
                     ))}
                 </div>
@@ -2281,7 +2667,17 @@ export default function Home() {
                                     )}
                                 </div>
 
-                                <div className="absolute top-3 left-3 flex gap-1.5">
+                                <div className="absolute top-3 left-3 flex flex-wrap gap-1.5">
+                                    {res.boosted && (
+                                        <span className="text-[11px] font-black px-2.5 py-1 rounded-full backdrop-blur-md bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border border-amber-300 shadow">
+                                            🔥 แนะนำพิเศษ (บูสต์)
+                                        </span>
+                                    )}
+                                    {res.distance != null && (
+                                        <span className="text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md bg-black/75 text-emerald-300 border border-emerald-500/40">
+                                            📍 {res.distance < 1 ? `${Math.round(res.distance * 1000)} ม.` : `${res.distance.toFixed(1)} กม.`}
+                                        </span>
+                                    )}
                                     <span className="text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md bg-black/65 text-white border border-white/15">
                                         {cover.type === 'video'
                                             ? 'วิดีโอ'
@@ -2320,9 +2716,15 @@ export default function Home() {
                                             </p>
                                         )}
                                     </div>
-                                    <span className="bg-amber-500/20 text-amber-400 font-black text-sm px-2.5 py-1 rounded-lg border border-amber-500/30 shrink-0">
-                                        {Number(res.rating).toFixed(1)}
-                                    </span>
+                                    <div className="flex flex-col items-end shrink-0">
+                                        <span className="bg-amber-500/20 text-amber-400 font-black text-sm px-2.5 py-1 rounded-lg border border-amber-500/30 flex items-center gap-1">
+                                            <span>⭐</span>
+                                            <span>{Number(res.rating).toFixed(1)}</span>
+                                        </span>
+                                        <span className="text-[10px] text-slate-400 mt-0.5">
+                                            {res.rating_count ? `${res.rating_count} โหวต` : 'ยังไม่มีโหวต'}
+                                        </span>
+                                    </div>
                                 </div>
                                 <p className="text-xs text-slate-300 bg-slate-950/60 p-3 rounded-xl border border-slate-800/80">
                                     <strong className="text-white">
@@ -2346,13 +2748,112 @@ export default function Home() {
                                     เปิดดู ({items.length} ไฟล์ • นับวิว)
                                 </button>
 
+                                {/* Active Promotions & Coupons */}
+                                {res.promotions && res.promotions.length > 0 && (
+                                    <div className="space-y-1.5 bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-transparent border border-amber-500/30 rounded-xl p-2.5">
+                                        {res.promotions.map((p) => (
+                                            <div key={p.id} className="flex items-center justify-between gap-2">
+                                                <div className="min-w-0">
+                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                        <span className="text-[10px] font-black bg-amber-500 text-slate-950 px-2 py-0.5 rounded-full uppercase">
+                                                            โปรโมชัน
+                                                        </span>
+                                                        <span className="text-xs font-bold text-amber-300 truncate">
+                                                            {p.title}
+                                                        </span>
+                                                    </div>
+                                                    {p.discount_text && (
+                                                        <p className="text-[11px] text-slate-300 mt-0.5">
+                                                            {p.discount_text}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                {p.coupon_code && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            copyCoupon(p.coupon_code!);
+                                                        }}
+                                                        className="shrink-0 bg-slate-800 hover:bg-slate-700 border border-amber-500/40 text-amber-300 font-mono font-bold text-[11px] px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1"
+                                                        title="คลิกเพื่อคัดลอกโค้ดคูปอง"
+                                                    >
+                                                        <span>🏷️ {p.coupon_code}</span>
+                                                        <span className="text-[9px] text-slate-400">คัดลอก</span>
+                                                    </button>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* Owner High-Tier Tools (Boost & Promo) */}
+                                {tier === 'premium' && res.is_mine && (
+                                    <div className="flex gap-1.5 pt-1">
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                boostReview(res);
+                                            }}
+                                            className="flex-1 text-[11px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 py-1.5 rounded-lg cursor-pointer transition flex items-center justify-center gap-1"
+                                            title="เพิ่มการมองเห็น 7 วัน"
+                                        >
+                                            <span>🚀</span>
+                                            <span>บูสต์การมองเห็น (7 วัน)</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setPromoFor(res);
+                                            }}
+                                            className="flex-1 text-[11px] font-bold bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 border border-orange-500/40 py-1.5 rounded-lg cursor-pointer transition flex items-center justify-center gap-1"
+                                            title="สร้างโปรโมชัน & คูปองส่วนลด"
+                                        >
+                                            <span>🏷️</span>
+                                            <span>จัดโปร/คูปอง</span>
+                                        </button>
+                                    </div>
+                                )}
+
                                 <div className="flex gap-1.5 flex-wrap">
+                                    {/* Rating button */}
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            openRating(res);
+                                        }}
+                                        className={`flex-1 text-[11px] font-bold py-2 px-2.5 rounded-lg cursor-pointer transition flex items-center justify-center gap-1 ${
+                                            res.my_score
+                                                ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50 hover:bg-amber-500/40'
+                                                : 'bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30'
+                                        }`}
+                                        title={res.my_score ? `คุณให้ ${res.my_score}★ แล้ว` : 'ให้คะแนนความอร่อย 1-5'}
+                                    >
+                                        <span>⭐</span>
+                                        <span>{res.my_score ? `ให้แล้ว (${res.my_score}★)` : 'ให้คะแนน'}</span>
+                                    </button>
+
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            shareReview(res);
+                                        }}
+                                        className="text-[11px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 px-3 py-2 rounded-lg cursor-pointer transition flex items-center gap-1"
+                                        title="แชร์รีวิว (LINE, Messenger, X, IG)"
+                                    >
+                                        <span>🔗</span>
+                                        <span>แชร์</span>
+                                    </button>
+
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
                                             openEditReview(res);
                                         }}
-                                        className="flex-1 text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 py-2 rounded-lg cursor-pointer transition"
+                                        className="text-[11px] bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 px-2.5 py-2 rounded-lg cursor-pointer transition"
                                     >
                                         แก้ไข
                                     </button>
@@ -2361,19 +2862,9 @@ export default function Home() {
                                             e.stopPropagation();
                                             openRequestModal(res);
                                         }}
-                                        className="flex-1 text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 py-2 rounded-lg cursor-pointer transition"
+                                        className="text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 px-2.5 py-2 rounded-lg cursor-pointer transition"
                                     >
                                         ส่งคำขอ
-                                    </button>
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            shareReview(res);
-                                        }}
-                                        className="text-[11px] bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 px-3 py-2 rounded-lg cursor-pointer transition"
-                                        title="แชร์รีวิว"
-                                    >
-                                        แชร์
                                     </button>
                                     {res.latitude && res.longitude && (
                                         <a
@@ -2979,6 +3470,344 @@ export default function Home() {
                             </>
                         )}
                     </div>
+                </div>
+            )}
+
+            {/* Rating Modal */}
+            {ratingFor && (
+                <div
+                    className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                    onClick={() => setRatingFor(null)}
+                >
+                    <div
+                        className="bg-slate-900 border border-amber-500/40 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex justify-between items-start">
+                            <div>
+                                <span className="text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-400 px-2.5 py-0.5 rounded-full border border-amber-500/30">
+                                    ประเมินรสชาติอาหาร
+                                </span>
+                                <h3 className="text-lg font-black text-white mt-1">
+                                    {ratingFor.name}
+                                </h3>
+                                <p className="text-xs text-slate-400">
+                                    เมนู: {ratingFor.must_try} • โดย {ratingFor.reviewer_name}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setRatingFor(null)}
+                                className="text-slate-400 hover:text-white cursor-pointer text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3 text-xs text-slate-300 space-y-1">
+                            <p className="text-amber-300 font-bold">
+                                💡 คะแนนของคุณช่วยสนับสนุนผู้รีวิว:
+                            </p>
+                            <p className="text-[11px] text-slate-400">
+                                คะแนน 1–5 จะนำไปคำนวณร่วมกับยอดวิว เพื่อจ่ายค่าตอบแทนให้ผู้โพสต์รีวิว 
+                                ในอัตรา 20–40% ของเงิน 100–200 บาท ต่อ 2,000 รีวิว/วิว
+                            </p>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-xs font-bold text-slate-300 block">
+                                ระดับความอร่อย (เลือก 1–5 คะแนน):
+                            </label>
+                            <div className="grid grid-cols-1 gap-2">
+                                {[
+                                    { score: 5, label: '⭐ 5 • อร่อยที่สุด 😋', color: 'hover:border-emerald-500 hover:bg-emerald-500/10' },
+                                    { score: 4, label: '⭐ 4 • อร่อย 👍', color: 'hover:border-teal-500 hover:bg-teal-500/10' },
+                                    { score: 3, label: '⭐ 3 • พอใช้ได้ 👌', color: 'hover:border-amber-500 hover:bg-amber-500/10' },
+                                    { score: 2, label: '⭐ 2 • ไม่ค่อยอร่อย 😕', color: 'hover:border-orange-500 hover:bg-orange-500/10' },
+                                    { score: 1, label: '⭐ 1 • ไม่อร่อยที่สุด 😣', color: 'hover:border-rose-500 hover:bg-rose-500/10' },
+                                ].map((item) => (
+                                    <button
+                                        key={item.score}
+                                        type="button"
+                                        onClick={() => setRatingScore(item.score)}
+                                        className={`w-full py-2.5 px-4 rounded-xl text-xs font-bold text-left transition border cursor-pointer flex items-center justify-between ${
+                                            ratingScore === item.score
+                                                ? 'bg-amber-500 text-slate-950 border-amber-400 font-black shadow-lg shadow-amber-500/20'
+                                                : `bg-slate-800 text-slate-200 border-slate-700 ${item.color}`
+                                        }`}
+                                    >
+                                        <span>{item.label}</span>
+                                        {ratingScore === item.score && <span>✓ เลือกแล้ว</span>}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Anti-bot Turnstile & Honeypot */}
+                        <div className="space-y-2">
+                            <TurnstileBox onToken={onTurnstileToken} />
+                            <input
+                                type="text"
+                                value={ratingHp}
+                                onChange={(e) => setRatingHp(e.target.value)}
+                                style={{ display: 'none' }}
+                                tabIndex={-1}
+                                autoComplete="off"
+                                aria-hidden="true"
+                            />
+                            <p className="text-[10px] text-slate-500 text-center">
+                                🔒 ป้องกันบอท: 1 บัญชีและอุปกรณ์ ให้คะแนนได้ 1 ครั้งต่อรีวิว
+                            </p>
+                        </div>
+
+                        <div className="flex gap-2 pt-2 border-t border-slate-800">
+                            <button
+                                type="button"
+                                onClick={() => setRatingFor(null)}
+                                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                            >
+                                ยกเลิก
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitRating}
+                                disabled={submittingRating || ratingScore === 0}
+                                className="flex-1 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 disabled:opacity-50 text-slate-950 font-black text-xs py-2.5 rounded-xl shadow-lg transition cursor-pointer"
+                            >
+                                {submittingRating ? 'กำลังบันทึก...' : 'ยืนยันให้คะแนน'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Share Modal */}
+            {shareFor && (
+                <div
+                    className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                    onClick={() => setShareFor(null)}
+                >
+                    <div
+                        className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex justify-between items-start">
+                            <div>
+                                <span className="text-[10px] font-bold uppercase tracking-wider bg-cyan-500/20 text-cyan-400 px-2.5 py-0.5 rounded-full border border-cyan-500/30">
+                                    แชร์รีวิวร้านอร่อย
+                                </span>
+                                <h3 className="text-base font-bold text-white mt-1">
+                                    {shareFor.name}
+                                </h3>
+                                <p className="text-xs text-slate-400">
+                                    ⭐ {Number(shareFor.rating).toFixed(1)} • {shareFor.must_try}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setShareFor(null)}
+                                className="text-slate-400 hover:text-white cursor-pointer text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <p className="text-xs text-slate-300">
+                            กดแชร์ไปยังแอปที่คุณต้องการได้ทันที ไม่ต้องคัดลอกลิงก์เอง:
+                        </p>
+
+                        <div className="grid grid-cols-1 gap-2.5">
+                            {/* LINE */}
+                            <button
+                                type="button"
+                                onClick={() => shareTo('line', shareFor)}
+                                className="w-full bg-[#06C755] hover:bg-[#05b34c] text-white font-bold text-xs py-3 px-4 rounded-xl flex items-center justify-center gap-2.5 shadow-md transition cursor-pointer"
+                            >
+                                <span className="text-base font-black">💬</span>
+                                <span>แชร์ไปยัง LINE</span>
+                            </button>
+
+                            {/* Facebook Messenger */}
+                            <button
+                                type="button"
+                                onClick={() => shareTo('messenger', shareFor)}
+                                className="w-full bg-gradient-to-r from-[#0084FF] to-[#00C6FF] hover:opacity-90 text-white font-bold text-xs py-3 px-4 rounded-xl flex items-center justify-center gap-2.5 shadow-md transition cursor-pointer"
+                            >
+                                <span className="text-base font-black">⚡</span>
+                                <span>แชร์ไปยัง Messenger</span>
+                            </button>
+
+                            {/* X (Twitter) */}
+                            <button
+                                type="button"
+                                onClick={() => shareTo('x', shareFor)}
+                                className="w-full bg-black hover:bg-neutral-900 text-white border border-neutral-700 font-bold text-xs py-3 px-4 rounded-xl flex items-center justify-center gap-2.5 shadow-md transition cursor-pointer"
+                            >
+                                <span className="text-base font-black">𝕏</span>
+                                <span>แชร์ลง X (Twitter)</span>
+                            </button>
+
+                            {/* Instagram */}
+                            <button
+                                type="button"
+                                onClick={() => shareTo('instagram', shareFor)}
+                                className="w-full bg-gradient-to-r from-[#833ab4] via-[#fd1d1d] to-[#fcb045] hover:opacity-90 text-white font-bold text-xs py-3 px-4 rounded-xl flex items-center justify-center gap-2.5 shadow-md transition cursor-pointer"
+                            >
+                                <span className="text-base font-black">📸</span>
+                                <span>แชร์ลง Instagram (Story / Direct)</span>
+                            </button>
+
+                            {/* Native / System Share */}
+                            {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
+                                <button
+                                    type="button"
+                                    onClick={() => shareTo('native', shareFor)}
+                                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 transition cursor-pointer"
+                                >
+                                    <span>📲</span>
+                                    <span>แชร์ผ่านระบบมือถือ (แอปอื่นๆ)</span>
+                                </button>
+                            )}
+                        </div>
+
+                        <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
+                            <span className="text-slate-400 text-[11px]">หรือคัดลอกลิงก์:</span>
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    try {
+                                        await navigator.clipboard.writeText(shareUrlOf(shareFor));
+                                        showToast('คัดลอกลิงก์รีวิวแล้ว');
+                                    } catch {
+                                        showToast(shareUrlOf(shareFor));
+                                    }
+                                    setShareFor(null);
+                                }}
+                                className="text-amber-400 hover:text-amber-300 font-bold text-[11px] underline cursor-pointer"
+                            >
+                                คัดลอกลิงก์รีวิว
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Promotion / Coupon Modal */}
+            {promoFor && (
+                <div
+                    className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                    onClick={() => setPromoFor(null)}
+                >
+                    <form
+                        onSubmit={submitPromotion}
+                        className="bg-slate-900 border border-amber-500/40 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex justify-between items-start">
+                            <div>
+                                <span className="text-[10px] font-black uppercase tracking-wider bg-amber-500 text-slate-950 px-2.5 py-0.5 rounded-full">
+                                    สมาชิกระดับสูง (Premium)
+                                </span>
+                                <h3 className="text-base font-bold text-white mt-1">
+                                    สร้างโปรโมชัน & คูปองส่วนลด
+                                </h3>
+                                <p className="text-xs text-slate-400">
+                                    สำหรับร้าน: {promoFor.name}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setPromoFor(null)}
+                                className="text-slate-400 hover:text-white cursor-pointer text-lg p-1"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="text-xs font-bold text-slate-300 block mb-1">
+                                    หัวข้อโปรโมชัน *
+                                </label>
+                                <input
+                                    type="text"
+                                    required
+                                    placeholder="เช่น ลดทันที 15% ฉลองเปิดร้าน"
+                                    value={promoForm.title}
+                                    onChange={(e) => setPromoForm({ ...promoForm, title: e.target.value })}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="text-xs font-bold text-slate-300 block mb-1">
+                                    รหัสคูปอง (Coupon Code)
+                                </label>
+                                <input
+                                    type="text"
+                                    placeholder="เช่น KINJING15 (A-Z, 0-9)"
+                                    value={promoForm.couponCode}
+                                    onChange={(e) => setPromoForm({ ...promoForm, couponCode: e.target.value.toUpperCase() })}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono uppercase focus:outline-none focus:border-amber-500"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="text-xs font-bold text-slate-300 block mb-1">
+                                    ข้อความส่วนลด
+                                </label>
+                                <input
+                                    type="text"
+                                    placeholder="เช่น ลด 15% เมื่อสั่ง 300 บาทขึ้นไป"
+                                    value={promoForm.discountText}
+                                    onChange={(e) => setPromoForm({ ...promoForm, discountText: e.target.value })}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="text-xs font-bold text-slate-300 block mb-1">
+                                    รายละเอียดเพิ่มเติม
+                                </label>
+                                <textarea
+                                    rows={2}
+                                    placeholder="เงื่อนไขการใช้คูปอง หรือรายละเอียดเพิ่มเติม..."
+                                    value={promoForm.description}
+                                    onChange={(e) => setPromoForm({ ...promoForm, description: e.target.value })}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="text-xs font-bold text-slate-300 block mb-1">
+                                    ระยะเวลาโปรโมชัน
+                                </label>
+                                <select
+                                    value={promoForm.days}
+                                    onChange={(e) => setPromoForm({ ...promoForm, days: e.target.value })}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                                >
+                                    <option value="7">7 วัน</option>
+                                    <option value="14">14 วัน</option>
+                                    <option value="30">30 วัน</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div className="flex gap-2 pt-2 border-t border-slate-800">
+                            <button
+                                type="button"
+                                onClick={() => setPromoFor(null)}
+                                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                            >
+                                ยกเลิก
+                            </button>
+                            <button
+                                type="submit"
+                                className="flex-1 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-slate-950 font-black text-xs py-2.5 rounded-xl shadow-lg transition cursor-pointer"
+                            >
+                                บันทึกโปรโมชัน
+                            </button>
+                        </div>
+                    </form>
                 </div>
             )}
 

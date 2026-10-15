@@ -21,14 +21,31 @@ export async function POST(req: NextRequest) {
             );
         }
 
-        // อัพโหลดไป Vercel Blob
-        const blob = await put(`kinjing/${Date.now()}-${file.name}`, file, {
-            access: 'public',
-        });
+        // พยายามอัพโหลดไป Vercel Blob ถ้ามี Token
+        if (process.env.BLOB_READ_WRITE_TOKEN) {
+            try {
+                const blob = await put(`kinjing/${Date.now()}-${file.name}`, file, {
+                    access: 'public',
+                });
+                return NextResponse.json({
+                    ok: true,
+                    url: blob.url,
+                    type: file.type.startsWith('video/') ? 'video' : 'image',
+                });
+            } catch (blobErr) {
+                console.warn('Vercel Blob upload failed, fallback to base64 Data URL:', blobErr);
+            }
+        }
+
+        // Fallback: แปลงเป็น Base64 Data URL ให้ใช้งานได้ทันที แม้ยังไม่ได้ต่อ Vercel Blob
+        const bytes = await file.arrayBuffer();
+        const buffer = Buffer.from(bytes);
+        const mime = file.type || (file.name.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg');
+        const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
 
         return NextResponse.json({
             ok: true,
-            url: blob.url,
+            url: dataUrl,
             type: file.type.startsWith('video/') ? 'video' : 'image',
         });
     } catch (err) {
