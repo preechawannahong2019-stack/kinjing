@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { api, type Membership, type UserProfile } from '../lib/client';
+import { api, baht, type Membership, type PendingOrder, type UserProfile } from '../lib/client';
 
 const input =
     'w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500';
@@ -88,9 +88,11 @@ export function AccountModal({
     onLoggedOut,
     showToast,
     onUpgrade,
+    pendingOrder,
 }: {
     open: boolean;
     onClose: () => void;
+    pendingOrder?: PendingOrder | null;
     membership: Membership;
     profile: UserProfile | null;
     onLoggedOut: () => Promise<void> | void;
@@ -137,6 +139,12 @@ export function AccountModal({
                 {profile?.displayName && <p>ชื่อที่แสดง: {profile.displayName}</p>}
                 <p>เบอร์โทร: {profile?.phoneMasked ?? '-'}</p>
                 {membership.isStore && <p>ลงประกาศขายได้: {membership.menuLimit} เมนู</p>}
+                {pendingOrder?.status === 'review' && (
+                    <p className="text-sky-300">⏳ ส่งสลิป {baht(pendingOrder.amount_satang)} แล้ว รอแอดมินตรวจและเปิดสิทธิ์</p>
+                )}
+                {pendingOrder?.status === 'rejected' && (
+                    <p className="text-rose-300">สลิปไม่ผ่านการตรวจ{pendingOrder.fail_reason ? `: ${pendingOrder.fail_reason}` : ''}</p>
+                )}
             </div>
             {membership.tier !== 'store_vip' && (
                 <button onClick={onUpgrade} className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-black py-2 rounded-xl text-xs cursor-pointer">

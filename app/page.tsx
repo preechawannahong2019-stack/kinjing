@@ -495,6 +495,15 @@ export default function Home() {
 
     const tier = membership.tier;
     const canStoreTools = membership.isStore;
+    /** เข้าสู่ระบบเป็นสมาชิกแล้ว (มีเบอร์โทร/รหัสผ่าน หรือมีสิทธิ์สมาชิก) */
+    const loggedIn = !!(profile?.hasPhone || profile?.hasPassword || membership.isVip);
+    const statusBadge = pendingOrder?.status === 'review'
+        ? '⏳ รอแอดมินตรวจสลิป'
+        : membership.isVip
+        ? `${membership.tierName} • ไม่มีโฆษณา`
+        : loggedIn
+        ? 'บัญชีสมาชิก • ยังไม่เปิดสิทธิ์'
+        : 'ผู้ใช้ทั่วไป (เห็นโฆษณา)';
 
     useEffect(() => {
         setIsInApp(detectInApp(navigator.userAgent));
@@ -1403,15 +1412,17 @@ export default function Home() {
 
                 {/* Desktop Menu (ซ่อนเมื่อเปิดใน LINE/Messenger/IG/X) */}
                 <div className={`${isInApp ? 'hidden' : 'hidden md:flex'} flex-wrap items-center gap-2.5 justify-end`}>
-                    {membership.isVip ? (
-                        <span className="inline-block text-xs font-black px-3 py-1 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 shadow">
-                            {membership.tierName} • ไม่มีโฆษณา
-                        </span>
-                    ) : (
-                        <span className="inline-block text-xs font-bold px-3 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                            ผู้ใช้ทั่วไป (เห็นโฆษณา)
-                        </span>
-                    )}
+                    <span
+                        className={`inline-block text-xs font-bold px-3 py-1 rounded-full ${
+                            membership.isVip
+                                ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40'
+                                : pendingOrder?.status === 'review'
+                                ? 'bg-sky-500/15 text-sky-300 border border-sky-500/40'
+                                : 'bg-slate-800 text-slate-300 border border-slate-700'
+                        }`}
+                    >
+                        {statusBadge}
+                    </span>
                     {(membership.isStore || storeStatus) && (
                         <button
                             onClick={() => setShowStoreDashboard(true)}
@@ -1420,7 +1431,7 @@ export default function Home() {
                             🏪 ร้านค้าของฉัน
                         </button>
                     )}
-                    {membership.tier !== 'store_vip' && (
+                    {!loggedIn && (
                         <button
                             onClick={() => setShowVipModal(true)}
                             disabled={!ready}
@@ -1429,10 +1440,10 @@ export default function Home() {
                             {membership.isVip ? 'อัปเกรดสมาชิก' : 'สมัครสมาชิก'}
                         </button>
                     )}
-                    {profile?.hasPhone || membership.isVip ? (
+                    {loggedIn ? (
                         <button
                             onClick={() => setShowAccount(true)}
-                            className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer"
+                            className="bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-500 hover:to-yellow-600 text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl shadow-lg transition cursor-pointer"
                         >
                             👤 บัญชีของฉัน
                         </button>
@@ -1498,26 +1509,22 @@ export default function Home() {
                         </div>
 
                         <div className="py-2">
-                            {membership.isVip ? (
-                                <span className="block text-xs font-black px-3 py-2 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 text-center">
-                                    {membership.tierName}
-                                </span>
-                            ) : (
-                                <span className="block text-xs font-bold px-3 py-2 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-center">
-                                    ผู้ใช้ทั่วไป (เห็นโฆษณา)
-                                </span>
-                            )}
+                            <span className="block text-xs font-bold px-3 py-2 rounded-full bg-slate-800 text-slate-200 border border-slate-700 text-center">
+                                {statusBadge}
+                            </span>
                         </div>
 
-                        <button
-                            onClick={() => {
-                                setShowVipModal(true);
-                                setMobileMenuOpen(false);
-                            }}
-                            className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-bold py-3 rounded-xl text-sm cursor-pointer"
-                        >
-                            {membership.isVip ? '⭐ อัปเกรดสมาชิก' : '⭐ สมัครสมาชิก'}
-                        </button>
+                        {!loggedIn && (
+                            <button
+                                onClick={() => {
+                                    setShowVipModal(true);
+                                    setMobileMenuOpen(false);
+                                }}
+                                className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-bold py-3 rounded-xl text-sm cursor-pointer"
+                            >
+                                ⭐ สมัครสมาชิก
+                            </button>
+                        )}
 
                         {(membership.isStore || storeStatus) && (
                             <button
@@ -1543,13 +1550,17 @@ export default function Home() {
 
                         <button
                             onClick={() => {
-                                if (profile?.hasPhone || membership.isVip) setShowAccount(true);
+                                if (loggedIn) setShowAccount(true);
                                 else setShowMemberLogin(true);
                                 setMobileMenuOpen(false);
                             }}
-                            className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
+                            className={`w-full font-bold py-3 rounded-xl text-sm cursor-pointer ${
+                                loggedIn
+                                    ? 'bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950'
+                                    : 'bg-sky-600 hover:bg-sky-700 text-white'
+                            }`}
                         >
-                            {profile?.hasPhone || membership.isVip ? '👤 บัญชีของฉัน' : '🔑 เข้าสู่ระบบสมาชิก'}
+                            {loggedIn ? '👤 บัญชีของฉัน' : '🔑 เข้าสู่ระบบสมาชิก'}
                         </button>
 
                         <hr className="border-slate-800" />
@@ -1682,7 +1693,7 @@ export default function Home() {
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                 <div className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl">
                                     <span className="text-[10px] text-indigo-300 block">
-                                        รายได้ VIP
+                                        รายได้ค่าสมาชิก
                                     </span>
                                     <span className="text-base font-black text-indigo-400">
                                         {baht(summary.revenue.subscriptionsSatang)}
@@ -1704,18 +1715,27 @@ export default function Home() {
                                         {baht(summary.revenue.totalSatang)}
                                     </span>
                                 </div>
-                                <div className="bg-slate-950 border border-indigo-500/40 px-4 py-2 rounded-xl">
-                                    <span className="text-[10px] text-indigo-300 block">
-                                        จ่ายรางวัลแล้ว
+                                <button
+                                    onClick={() => setShowModeration(true)}
+                                    className="bg-slate-950 border border-amber-500/50 hover:border-amber-400 px-4 py-2 rounded-xl text-left cursor-pointer"
+                                >
+                                    <span className="text-[10px] text-amber-300 block">
+                                        สมาชิกที่เปิดสิทธิ์แล้ว
                                     </span>
-                                    <span className="text-base font-black text-indigo-400">
-                                        {baht(summary.revenue.payoutsPaidSatang)}
+                                    <span className="text-base font-black text-amber-400">
+                                        {summary.activeSubscribers} คน →
                                     </span>
-                                </div>
+                                </button>
                             </div>
-                            <div className="text-xs text-slate-400">
-                                สมาชิก VIP ที่ใช้งานอยู่: {summary.activeSubscribers} คน
-                            </div>
+                            <button
+                                onClick={() => {
+                                    setShowModeration(true);
+                                    setTimeout(() => document.getElementById('member-admin')?.scrollIntoView({ behavior: 'smooth' }), 50);
+                                }}
+                                className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-black text-sm py-3 rounded-xl cursor-pointer"
+                            >
+                                👥 บริหารจัดการสมาชิก (รายชื่อ • ระดับ • สลิปรอตรวจ • บล็อก • รีเซ็ตรหัส)
+                            </button>
                         </>
                     ) : (
                         <p className="text-xs text-slate-400">
@@ -1725,6 +1745,9 @@ export default function Home() {
                 </section>
             )}
 
+            {isAdmin && showModeration && (
+                <div id="member-admin" />
+            )}
             {isAdmin && showModeration && (
                 <AdminModeration
                     showToast={showToast}
@@ -3485,6 +3508,7 @@ export default function Home() {
                 onClose={() => setShowAccount(false)}
                 membership={membership}
                 profile={profile}
+                pendingOrder={pendingOrder}
                 showToast={showToast}
                 onLoggedOut={async () => {
                     await Promise.all([refreshMe(), refreshReviews()]);
