@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { api, uploadMedia } from '../lib/client';
+import FilePicker from './FilePicker';
 
 export interface StoreProfileData {
     store_name: string;
@@ -134,8 +135,7 @@ export default function StoreProfileForm({
             </div>
             <div>
                 <label className="text-xs font-bold text-slate-300 block mb-1">รูปหน้าร้าน * (เห็นป้ายชื่อร้านชัดเจน)</label>
-                <input type="file" accept="image/*" onChange={onPhoto} disabled={uploading} className="text-xs text-slate-300" />
-                {uploading && <p className="text-[11px] text-amber-300 mt-1">กำลังอัปโหลดและตรวจสอบรูป...</p>}
+                <FilePicker label={storefrontUrl ? 'เปลี่ยนรูปหน้าร้าน' : 'ถ่าย/เลือกรูปหน้าร้าน'} accept="image/*" busy={uploading} onChange={onPhoto} />
                 {storefrontUrl && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={storefrontUrl} alt="หน้าร้าน" className="mt-2 h-32 rounded-lg object-cover border border-slate-700" />

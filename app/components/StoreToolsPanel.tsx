@@ -70,7 +70,7 @@ export default function StoreToolsPanel({
             <section className="bg-gradient-to-r from-amber-950/40 to-slate-900 border border-amber-500/30 rounded-2xl p-4 space-y-2">
                 <p className="text-sm font-bold text-amber-300">🏪 สิทธิ์เพิ่มเติมสำหรับสมาชิกระดับร้านค้า</p>
                 <ul className="text-xs text-slate-300 grid grid-cols-1 sm:grid-cols-3 gap-1.5">
-                    <li>🚀 เพิ่มการมองเห็นรีวิว (ขึ้นแนะนำพิเศษ)</li>
+                    <li>🚀 บูสต์ 10 ครั้ง ขึ้น “เมนูเด็ดแนะนำ” หน้าแรก</li>
                     <li>🏷️ สร้างคูปองส่วนลด + 🎟️ คูปองกินฟรีรายเดือน</li>
                     <li>🛒 ลงขายสินค้า/อาหาร 10 เมนู (VIP 20 เมนู)</li>
                 </ul>
@@ -93,7 +93,7 @@ export default function StoreToolsPanel({
             {stats && (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                     {[
-                        ['🚀 บูสต์ที่ใช้งาน', `${stats.activeBoosts} / ${stats.maxBoosts}`],
+                        ['🚀 บูสต์ที่ใช้งาน (รีวิว+เมนู)', `${stats.activeBoosts} / ${stats.maxBoosts}`],
                         ['🏷️ โปรโมชัน/คูปองที่เปิดอยู่', `${stats.activePromos}`],
                         ['🎟️ คูปองกินฟรีเดือนนี้', `${stats.freeMealThisMonth} / ${stats.freeMealLimit}`],
                         ['🛒 เมนูขายที่เปิดอยู่', `${listingCount} / ${membership.menuLimit}`],

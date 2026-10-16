@@ -19,6 +19,7 @@ import MarketSection from './components/MarketSection';
 import ReportModal, { type ReportTarget } from './components/ReportModal';
 import AdminModeration from './components/AdminModeration';
 import StoreToolsPanel from './components/StoreToolsPanel';
+import FilePicker from './components/FilePicker';
 import { AccountModal, LoginModal } from './components/AuthModals';
 
 // ==================== Types ====================
@@ -2589,13 +2590,13 @@ export default function Home() {
                         <label className="block text-xs font-bold text-slate-300">
                             รูปภาพ / วิดีโอ ({newMedia.length}/{MAX_MEDIA_ITEMS})
                         </label>
-                        <input
-                            type="file"
+                        <FilePicker
+                            label="เพิ่มรูปภาพ / วิดีโอ"
                             accept="image/*,video/*"
                             multiple
+                            busy={uploading}
                             onChange={handleFilesUpload}
                             disabled={newMedia.length >= MAX_MEDIA_ITEMS}
-                            className="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-orange-500 file:text-white cursor-pointer disabled:opacity-50"
                         />
                         <p className="text-[10px] text-slate-500">
                             เลือกได้หลายไฟล์พร้อมกัน (กด Shift/Ctrl ค้างไว้)
@@ -3174,16 +3175,13 @@ export default function Home() {
                                 รูป/วิดีโอ ({editReviewForm.mediaItems.length}/
                                 {MAX_MEDIA_ITEMS})
                             </label>
-                            <input
-                                type="file"
+                            <FilePicker
+                                label="เพิ่มรูปภาพ / วิดีโอ"
                                 accept="image/*,video/*"
                                 multiple
+                                busy={uploading}
                                 onChange={handleEditReviewMedia}
-                                disabled={
-                                    editReviewForm.mediaItems.length >=
-                                    MAX_MEDIA_ITEMS
-                                }
-                                className="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-orange-500 file:text-white cursor-pointer disabled:opacity-50"
+                                disabled={editReviewForm.mediaItems.length >= MAX_MEDIA_ITEMS}
                             />
                         </div>
 

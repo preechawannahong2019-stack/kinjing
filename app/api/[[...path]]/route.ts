@@ -171,6 +171,10 @@ function ensureSchema(): Promise<void> {
                      resolved_at timestamptz
                  );
                  ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
+                 ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS promo_price_satang int;
+                 ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS coupon_code text;
+                 ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS discount_text text;
+                 ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS boosted_until timestamptz;
                  ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
                  ALTER TABLE membership_orders ADD COLUMN IF NOT EXISTS slip_url text;
                  ALTER TABLE membership_orders ADD COLUMN IF NOT EXISTS fail_reason text;
@@ -1709,7 +1713,17 @@ async function h_reviews_id_rate_POST(
 
 // ==================== ROUTE: reviews/:id/boost (premium) ====================
 const BOOST_DAYS = 7;
-const MAX_ACTIVE_BOOSTS = 3;
+/** โควตาบูสต์ = จำนวนเมนูที่สิทธิ์ลงขายได้ (ร้านค้า 10 / VIP 20) — นับรวมรีวิวและเมนูขาย */
+async function activeBoostCount(uid: string, excludeId: string | null = null): Promise<number> {
+    const [r] = await query<{ n: number }>(
+        `SELECT (SELECT COUNT(*) FROM restaurants
+                  WHERE reviewer_id=$1 AND boosted_until > now() AND id IS DISTINCT FROM $2::uuid)
+              + (SELECT COUNT(*) FROM store_listings
+                  WHERE owner_id=$1 AND boosted_until > now() AND id IS DISTINCT FROM $2::uuid) AS n`,
+        [uid, excludeId]
+    );
+    return Number(r.n);
+}
 
 async function h_reviews_id_boost_POST(
     req: NextRequest,
@@ -1738,14 +1752,9 @@ async function h_reviews_id_boost_POST(
     if (own[0].reviewer_id !== uid)
         return NextResponse.json({ error: 'คุณไม่ใช่เจ้าของรีวิวนี้' }, { status: 403 });
 
-    const [active] = await query<{ n: number }>(
-        `SELECT COUNT(*)::int AS n FROM restaurants
-         WHERE reviewer_id=$1 AND boosted_until > now() AND id<>$2`,
-        [uid, id]
-    );
-    if (active.n >= MAX_ACTIVE_BOOSTS)
+    if ((await activeBoostCount(uid, id)) >= m.menuLimit)
         return NextResponse.json(
-            { error: `บูสต์พร้อมกันได้สูงสุด ${MAX_ACTIVE_BOOSTS} รีวิว` },
+            { error: `บูสต์พร้อมกันได้สูงสุด ${m.menuLimit} รายการ (รีวิว + เมนูขาย)` },
             { status: 429 }
         );
 
@@ -2806,7 +2815,9 @@ async function h_me_store_GET(req: NextRequest) {
             [uid]
         ),
         query(
-            `SELECT id, title, price_satang, description, image_url, active, created_at
+            `SELECT id, title, price_satang, promo_price_satang, coupon_code, discount_text,
+                    description, image_url, active, created_at, boosted_until,
+                    (boosted_until IS NOT NULL AND boosted_until > now()) AS boosted
              FROM store_listings WHERE owner_id=$1 ORDER BY created_at DESC`,
             [uid]
         ),
@@ -2823,8 +2834,10 @@ async function h_me_store_GET(req: NextRequest) {
         ),
         query<{ active_boosts: number; free_meal_month: number; active_promos: number }>(
             `SELECT
-                (SELECT COUNT(*)::int FROM restaurants
-                  WHERE reviewer_id=$1 AND boosted_until > now()) AS active_boosts,
+                ((SELECT COUNT(*) FROM restaurants
+                  WHERE reviewer_id=$1 AND boosted_until > now())
+                 + (SELECT COUNT(*) FROM store_listings
+                  WHERE owner_id=$1 AND boosted_until > now()))::int AS active_boosts,
                 (SELECT COUNT(*)::int FROM promotions
                   WHERE owner_id=$1 AND kind='free_meal'
                     AND date_trunc('month', created_at AT TIME ZONE 'Asia/Bangkok')
@@ -2843,7 +2856,7 @@ async function h_me_store_GET(req: NextRequest) {
         myReviews,
         stats: {
             activeBoosts: stats.active_boosts,
-            maxBoosts: MAX_ACTIVE_BOOSTS,
+            maxBoosts: m.menuLimit,
             boostDays: BOOST_DAYS,
             freeMealThisMonth: stats.free_meal_month,
             freeMealLimit: 1,
@@ -2856,14 +2869,17 @@ async function h_me_store_GET(req: NextRequest) {
 async function h_listings_GET(req: NextRequest) {
     const uid = getUserId(req);
     const rows = await query(
-        `SELECT l.id, l.title, l.price_satang, l.description, l.image_url, l.created_at,
+        `SELECT l.id, l.title, l.price_satang, l.promo_price_satang, l.coupon_code, l.discount_text,
+                l.description, l.image_url, l.created_at,
+                (l.boosted_until IS NOT NULL AND l.boosted_until > now()) AS boosted,
                 sp.store_name, sp.latitude, sp.longitude, sp.address, sp.map_url,
                 ($1::uuid IS NOT NULL AND l.owner_id = $1::uuid) AS is_mine
          FROM store_listings l
          JOIN store_profiles sp ON sp.user_id = l.owner_id AND sp.status = 'approved'
          JOIN users u ON u.id = l.owner_id AND u.blocked_at IS NULL
          WHERE l.active
-         ORDER BY l.created_at DESC LIMIT 60`,
+         ORDER BY (l.boosted_until IS NOT NULL AND l.boosted_until > now()) DESC,
+                  l.created_at DESC LIMIT 60`,
         [uid]
     );
     return NextResponse.json({ listings: rows });
@@ -2878,7 +2894,14 @@ function parseListing(b: Record<string, unknown> | null) {
             ? null
             : Math.round(Math.min(Math.max(priceBaht, 0), 100000) * 100);
     const imageUrl = str(b?.imageUrl, 500);
-    return { title, description, priceSatang, imageUrl };
+    const promoBaht = Number(b?.promoPriceBaht);
+    const promoPriceSatang =
+        b?.promoPriceBaht === '' || b?.promoPriceBaht == null || !Number.isFinite(promoBaht)
+            ? null
+            : Math.round(Math.min(Math.max(promoBaht, 0), 100000) * 100);
+    const couponCode = str(b?.couponCode, 40).toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    const discountText = str(b?.discountText, 80);
+    return { title, description, priceSatang, imageUrl, promoPriceSatang, couponCode, discountText };
 }
 
 async function storeGate(uid: string): Promise<NextResponse | { menuLimit: number }> {
@@ -2894,11 +2917,17 @@ async function storeGate(uid: string): Promise<NextResponse | { menuLimit: numbe
         'SELECT status FROM store_profiles WHERE user_id=$1',
         [uid]
     );
-    if (sp[0]?.status !== 'approved')
+    if (!sp[0])
         return NextResponse.json(
-            { error: 'ร้านค้าของคุณยังไม่ผ่านการยืนยันตัวตนจากแอดมิน' },
+            { error: 'กรุณากรอกข้อมูลยืนยันตัวตนร้านค้า (แผนที่ + รูปหน้าร้าน) ก่อน' },
             { status: 403 }
         );
+    if (sp[0].status === 'rejected')
+        return NextResponse.json(
+            { error: 'ข้อมูลร้านค้าไม่ผ่านการตรวจสอบ กรุณาแก้ไขแล้วส่งใหม่' },
+            { status: 403 }
+        );
+    // ร้านที่รออนุมัติ ลงเมนูเตรียมไว้ได้ แต่จะแสดงต่อสาธารณะเมื่อแอดมินอนุมัติแล้ว
     return { menuLimit: m.menuLimit };
 }
 
@@ -2912,7 +2941,7 @@ async function h_listings_POST(req: NextRequest) {
     const l = parseListing(await req.json().catch(() => null));
     if (!l.title)
         return NextResponse.json({ error: 'กรุณากรอกชื่อสินค้า/เมนู' }, { status: 400 });
-    const bad = textViolation(l.title, l.description);
+    const bad = textViolation(l.title, l.description, l.discountText);
     if (bad) return NextResponse.json({ error: bad }, { status: 422 });
     if (l.imageUrl) {
         const mod = await moderateMedia([{ type: 'image', url: l.imageUrl }], uid, ipHash(req));
@@ -2930,9 +2959,11 @@ async function h_listings_POST(req: NextRequest) {
         );
 
     const [row] = await query<{ id: string }>(
-        `INSERT INTO store_listings (owner_id, title, price_satang, description, image_url)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-        [uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null]
+        `INSERT INTO store_listings
+            (owner_id, title, price_satang, description, image_url, promo_price_satang, coupon_code, discount_text)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null,
+         l.promoPriceSatang, l.couponCode || null, l.discountText || null]
     );
     await audit(uid, 'listing_created', { listingId: row.id }, ipHash(req));
     return NextResponse.json({ ok: true, id: row.id });
@@ -2961,7 +2992,7 @@ async function h_listings_id_PATCH(
     const active = typeof body?.active === 'boolean' ? body.active : own[0].active;
     if (!l.title)
         return NextResponse.json({ error: 'กรุณากรอกชื่อสินค้า/เมนู' }, { status: 400 });
-    const bad = textViolation(l.title, l.description);
+    const bad = textViolation(l.title, l.description, l.discountText);
     if (bad) return NextResponse.json({ error: bad }, { status: 422 });
     if (l.imageUrl && l.imageUrl !== own[0].image_url) {
         const mod = await moderateMedia([{ type: 'image', url: l.imageUrl }], uid, ipHash(req));
@@ -2980,9 +3011,11 @@ async function h_listings_id_PATCH(
     }
     await query(
         `UPDATE store_listings SET title=$3, price_satang=$4, description=$5,
-                image_url=$6, active=$7, updated_at=now()
+                image_url=$6, active=$7, promo_price_satang=$8, coupon_code=$9,
+                discount_text=$10, updated_at=now()
          WHERE id=$1 AND owner_id=$2`,
-        [id, uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null, active]
+        [id, uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null, active,
+         l.promoPriceSatang, l.couponCode || null, l.discountText || null]
     );
     return NextResponse.json({ ok: true });
 }
@@ -3004,6 +3037,40 @@ async function h_listings_id_DELETE(
     if (!rows[0]) return NextResponse.json({ error: 'not found' }, { status: 404 });
     await audit(admin ? 'admin' : uid!, 'listing_deleted', { listingId: id }, ipHash(req));
     return NextResponse.json({ ok: true });
+}
+
+// ==================== ROUTE: listings/:id/boost (เมนูเด็ดแนะนำ) ====================
+async function h_listings_id_boost_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const gate = await storeGate(uid);
+    if (gate instanceof NextResponse) return gate;
+    const own = await query<{ active: boolean }>(
+        'SELECT active FROM store_listings WHERE id=$1 AND owner_id=$2',
+        [id, uid]
+    );
+    if (!own[0]) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    if (!own[0].active)
+        return NextResponse.json({ error: 'เปิดขายเมนูนี้ก่อนจึงบูสต์ได้' }, { status: 400 });
+    if ((await activeBoostCount(uid, id)) >= gate.menuLimit)
+        return NextResponse.json(
+            { error: `บูสต์พร้อมกันได้สูงสุด ${gate.menuLimit} รายการ (รีวิว + เมนูขาย)` },
+            { status: 429 }
+        );
+    const [row] = await query<{ boosted_until: string }>(
+        `UPDATE store_listings
+         SET boosted_until = GREATEST(COALESCE(boosted_until, now()), now()) + make_interval(days => $2)
+         WHERE id=$1 RETURNING boosted_until`,
+        [id, BOOST_DAYS]
+    );
+    await audit(uid, 'listing_boosted', { listingId: id }, ipHash(req));
+    return NextResponse.json({ ok: true, boostedUntil: row.boosted_until });
 }
 
 // ==================== ROUTE: promotions/:id/claim (คูปองกินฟรี) ====================
@@ -3521,6 +3588,7 @@ type IdRoute = (
 const ID_ROUTES: { method: string; pattern: string[]; handler: IdRoute }[] = [
     { method: 'PATCH', pattern: ['listings', ':id'], handler: h_listings_id_PATCH },
     { method: 'DELETE', pattern: ['listings', ':id'], handler: h_listings_id_DELETE },
+    { method: 'POST', pattern: ['listings', ':id', 'boost'], handler: h_listings_id_boost_POST },
     { method: 'POST', pattern: ['promotions', ':id', 'claim'], handler: h_promotions_id_claim_POST },
     { method: 'PATCH', pattern: ['admin', 'stores', ':id'], handler: h_admin_stores_id_PATCH },
     { method: 'PATCH', pattern: ['admin', 'reports', ':id'], handler: h_admin_reports_id_PATCH },

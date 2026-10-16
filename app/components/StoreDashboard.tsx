@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, baht, uploadMedia } from '../lib/client';
 import StoreProfileForm, { type StoreProfileData } from './StoreProfileForm';
+import FilePicker from './FilePicker';
 
 interface Listing {
     id: string;
@@ -11,6 +12,11 @@ interface Listing {
     description: string | null;
     image_url: string | null;
     active: boolean;
+    promo_price_satang: number | null;
+    coupon_code: string | null;
+    discount_text: string | null;
+    boosted: boolean;
+    boosted_until: string | null;
 }
 
 interface StoreResp {
@@ -23,7 +29,18 @@ interface StoreResp {
 const input =
     'w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500';
 
-const emptyForm = { id: '', title: '', priceBaht: '', description: '', imageUrl: '' };
+const emptyForm = { id: '', title: '', priceBaht: '', description: '', imageUrl: '', promoPriceBaht: '', couponCode: '', discountText: '' };
+
+const listingBody = (l: Listing, active: boolean) => ({
+    title: l.title,
+    priceBaht: l.price_satang != null ? l.price_satang / 100 : '',
+    promoPriceBaht: l.promo_price_satang != null ? l.promo_price_satang / 100 : '',
+    couponCode: l.coupon_code ?? '',
+    discountText: l.discount_text ?? '',
+    description: l.description ?? '',
+    imageUrl: l.image_url ?? '',
+    active,
+});
 
 const STATUS: Record<string, string> = {
     pending: '⏳ รอแอดมินตรวจสอบ',
@@ -96,6 +113,9 @@ export default function StoreDashboard({
         const body = JSON.stringify({
             title: form.title,
             priceBaht: form.priceBaht,
+            promoPriceBaht: form.promoPriceBaht,
+            couponCode: form.couponCode,
+            discountText: form.discountText,
             description: form.description,
             imageUrl: form.imageUrl,
         });
@@ -116,15 +136,17 @@ export default function StoreDashboard({
     const toggle = async (l: Listing) => {
         const r = await api<{ error?: string }>(`/api/listings/${l.id}`, {
             method: 'PATCH',
-            body: JSON.stringify({
-                title: l.title,
-                priceBaht: l.price_satang != null ? l.price_satang / 100 : '',
-                description: l.description ?? '',
-                imageUrl: l.image_url ?? '',
-                active: !l.active,
-            }),
+            body: JSON.stringify(listingBody(l, !l.active)),
         });
         if (!r.ok) showToast(r.data?.error ?? 'ดำเนินการไม่สำเร็จ');
+        await load();
+        onChanged();
+    };
+
+    const boost = async (l: Listing) => {
+        const r = await api<{ error?: string }>(`/api/listings/${l.id}/boost`, { method: 'POST' });
+        if (!r.ok) showToast(r.data?.error ?? 'บูสต์ไม่สำเร็จ');
+        else showToast(`🚀 บูสต์ "${l.title}" ขึ้นเมนูเด็ดแนะนำ 7 วันแล้ว`);
         await load();
         onChanged();
     };
@@ -185,7 +207,7 @@ export default function StoreDashboard({
                                         setForm(emptyForm);
                                         setShowForm(true);
                                     }}
-                                    disabled={!approved || activeCount >= data.menuLimit}
+                                    disabled={activeCount >= data.menuLimit}
                                     className="text-[11px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded-lg cursor-pointer"
                                 >
                                     + ลงประกาศขาย
@@ -193,18 +215,20 @@ export default function StoreDashboard({
                             </div>
                         </div>
                         {!approved && (
-                            <p className="text-[11px] text-amber-300">ลงประกาศขายได้หลังแอดมินยืนยันร้านค้า (การแก้ไขข้อมูลร้านจะต้องรอตรวจสอบใหม่)</p>
+                            <p className="text-[11px] text-amber-300">ลงเมนูเตรียมไว้ได้เลย — เมนูจะแสดงต่อลูกค้าเมื่อแอดมินยืนยันร้านค้าแล้ว (แก้ไขข้อมูลร้านต้องรอตรวจใหม่)</p>
                         )}
 
                         {showForm && (
                             <form onSubmit={save} className="space-y-2.5 bg-slate-950/60 border border-slate-800 rounded-xl p-3">
                                 <input className={input} placeholder="ชื่อสินค้า/เมนู *" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required maxLength={120} />
-                                <input className={input} placeholder="ราคา (บาท)" inputMode="decimal" value={form.priceBaht} onChange={(e) => setForm({ ...form, priceBaht: e.target.value })} />
-                                <textarea className={input} rows={2} placeholder="รายละเอียด" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={500} />
-                                <div className="flex items-center gap-2">
-                                    <input type="file" accept="image/*" onChange={onImage} disabled={uploading} className="text-xs text-slate-300" />
-                                    {uploading && <span className="text-[11px] text-amber-300">กำลังอัปโหลดและตรวจสอบ...</span>}
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input className={input} placeholder="ราคาปกติ (บาท)" inputMode="decimal" value={form.priceBaht} onChange={(e) => setForm({ ...form, priceBaht: e.target.value })} />
+                                    <input className={input} placeholder="ราคาโปรโมชัน (บาท)" inputMode="decimal" value={form.promoPriceBaht} onChange={(e) => setForm({ ...form, promoPriceBaht: e.target.value })} />
+                                    <input className={`${input} font-mono uppercase`} placeholder="โค้ดคูปอง เช่น KINJING10" value={form.couponCode} onChange={(e) => setForm({ ...form, couponCode: e.target.value.toUpperCase() })} maxLength={40} />
+                                    <input className={input} placeholder="ข้อความส่วนลด เช่น ลด 10% แสดงโค้ดที่ร้าน" value={form.discountText} onChange={(e) => setForm({ ...form, discountText: e.target.value })} maxLength={80} />
                                 </div>
+                                <textarea className={input} rows={2} placeholder="รายละเอียด" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={500} />
+                                <FilePicker label={form.imageUrl ? 'เปลี่ยนรูปเมนู' : 'เพิ่มรูปเมนู'} accept="image/*" busy={uploading} onChange={onImage} />
                                 {form.imageUrl && (
                                     // eslint-disable-next-line @next/next/no-img-element
                                     <img src={form.imageUrl} alt="" className="h-24 rounded-lg object-cover" />
@@ -229,15 +253,36 @@ export default function StoreDashboard({
                                     )}
                                     <div className="min-w-0 flex-1">
                                         <p className="text-xs font-bold text-white truncate">{l.title}</p>
-                                        <p className="text-[11px] text-amber-300">{l.price_satang != null ? baht(l.price_satang) : 'ไม่ระบุราคา'}</p>
+                                        <p className="text-[11px] text-amber-300">
+                                            {l.promo_price_satang != null ? (
+                                                <>
+                                                    <b>{baht(l.promo_price_satang)}</b>{' '}
+                                                    {l.price_satang != null && <s className="text-slate-500">{baht(l.price_satang)}</s>}
+                                                </>
+                                            ) : l.price_satang != null ? (
+                                                baht(l.price_satang)
+                                            ) : (
+                                                'ไม่ระบุราคา'
+                                            )}
+                                            {l.coupon_code && <span className="ml-1 font-mono text-emerald-300">🏷️ {l.coupon_code}</span>}
+                                        </p>
+                                        {l.boosted && <p className="text-[10px] text-orange-300">🔥 เมนูเด็ดแนะนำ ถึง {new Date(l.boosted_until!).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}</p>}
                                     </div>
-                                    <div className="flex gap-1 shrink-0">
+                                    <div className="flex flex-wrap gap-1 shrink-0 justify-end">
+                                        {l.active && (
+                                            <button onClick={() => boost(l)} className="text-[10px] font-bold bg-orange-500/25 text-orange-300 border border-orange-500/40 px-2 py-1 rounded cursor-pointer">
+                                                🚀 {l.boosted ? 'ต่อบูสต์' : 'บูสต์'}
+                                            </button>
+                                        )}
                                         <button
                                             onClick={() => {
                                                 setForm({
                                                     id: l.id,
                                                     title: l.title,
                                                     priceBaht: l.price_satang != null ? String(l.price_satang / 100) : '',
+                                                    promoPriceBaht: l.promo_price_satang != null ? String(l.promo_price_satang / 100) : '',
+                                                    couponCode: l.coupon_code ?? '',
+                                                    discountText: l.discount_text ?? '',
                                                     description: l.description ?? '',
                                                     imageUrl: l.image_url ?? '',
                                                 });
