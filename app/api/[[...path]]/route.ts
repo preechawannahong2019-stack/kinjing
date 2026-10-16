@@ -6,6 +6,9 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool, PoolClient, QueryResultRow } from 'pg';
+import { del } from '@vercel/blob';
+import generatePayload from 'promptpay-qr';
+import QRCode from 'qrcode';
 
 // ==================== DB ====================
 declare global {
@@ -88,7 +91,91 @@ function ensureSchema(): Promise<void> {
                      created_at timestamptz NOT NULL DEFAULT now()
                  );
                  CREATE INDEX IF NOT EXISTS promotions_restaurant_idx
-                     ON promotions (restaurant_id, ends_at);`
+                     ON promotions (restaurant_id, ends_at);
+                 -- ===== ปรับแก้: สมาชิกจ่ายครั้งเดียว / ร้านค้า / ตรวจเนื้อหา =====
+                 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone text;
+                 ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at timestamptz;
+                 ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at timestamptz;
+                 ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_reason text;
+                 CREATE UNIQUE INDEX IF NOT EXISTS users_phone_uidx ON users (phone) WHERE phone IS NOT NULL;
+                 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS is_exclusive boolean NOT NULL DEFAULT false;
+                 ALTER TABLE promotions ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'discount';
+                 ALTER TABLE promotions ADD COLUMN IF NOT EXISTS quota int;
+                 ALTER TABLE promotions ADD COLUMN IF NOT EXISTS claimed_count int NOT NULL DEFAULT 0;
+                 CREATE TABLE IF NOT EXISTS promotion_claims (
+                     id bigserial PRIMARY KEY,
+                     promotion_id uuid NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+                     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                     ip_hash text,
+                     code text NOT NULL,
+                     created_at timestamptz NOT NULL DEFAULT now(),
+                     UNIQUE (promotion_id, user_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS memberships (
+                     user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                     tier text NOT NULL,
+                     order_id uuid,
+                     activated_at timestamptz NOT NULL DEFAULT now(),
+                     updated_at timestamptz NOT NULL DEFAULT now()
+                 );
+                 CREATE TABLE IF NOT EXISTS membership_orders (
+                     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                     tier text NOT NULL,
+                     amount_satang int NOT NULL,
+                     status text NOT NULL DEFAULT 'pending',
+                     slip_ref text,
+                     slip_sender text,
+                     verify_attempts int NOT NULL DEFAULT 0,
+                     created_at timestamptz NOT NULL DEFAULT now(),
+                     paid_at timestamptz
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS membership_orders_slip_ref_uidx
+                     ON membership_orders (slip_ref) WHERE slip_ref IS NOT NULL;
+                 CREATE TABLE IF NOT EXISTS store_profiles (
+                     user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                     store_name text NOT NULL,
+                     map_url text,
+                     latitude double precision,
+                     longitude double precision,
+                     address text,
+                     storefront_url text NOT NULL,
+                     contact_phone text,
+                     status text NOT NULL DEFAULT 'pending',
+                     admin_note text,
+                     reviewed_at timestamptz,
+                     created_at timestamptz NOT NULL DEFAULT now(),
+                     updated_at timestamptz NOT NULL DEFAULT now()
+                 );
+                 CREATE TABLE IF NOT EXISTS store_listings (
+                     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                     owner_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                     title text NOT NULL,
+                     price_satang int,
+                     description text,
+                     image_url text,
+                     active boolean NOT NULL DEFAULT true,
+                     created_at timestamptz NOT NULL DEFAULT now(),
+                     updated_at timestamptz NOT NULL DEFAULT now()
+                 );
+                 CREATE INDEX IF NOT EXISTS store_listings_owner_idx ON store_listings (owner_id, active);
+                 CREATE TABLE IF NOT EXISTS content_reports (
+                     id bigserial PRIMARY KEY,
+                     target_type text NOT NULL,
+                     target_id uuid NOT NULL,
+                     reporter_id uuid REFERENCES users(id) ON DELETE SET NULL,
+                     reason text NOT NULL,
+                     status text NOT NULL DEFAULT 'open',
+                     admin_note text,
+                     created_at timestamptz NOT NULL DEFAULT now(),
+                     resolved_at timestamptz
+                 );
+                 CREATE TABLE IF NOT EXISTS media_checks (
+                     url text PRIMARY KEY,
+                     ok boolean NOT NULL,
+                     reason text,
+                     checked_at timestamptz NOT NULL DEFAULT now()
+                 );`
             )
             .then(() => undefined)
             .catch((e) => {
@@ -255,171 +342,441 @@ async function auditTx(
     await c.query(AUDIT_SQL, [actor, action, JSON.stringify(detail), ip]);
 }
 
-// ==================== BILLING (Omise) ====================
-const OMISE_API = 'https://api.omise.co';
+// ==================== MEMBERSHIP (จ่ายครั้งเดียว) ====================
+// รายได้ของระบบมาจาก "แอดโฆษณา" และ "ค่าสมัครสมาชิก" เท่านั้น — ไม่มีการแบ่งรายได้ให้ผู้ใช้ทั่วไป
+type Tier = 'free' | 'member' | 'store' | 'store_vip';
+type PaidTier = Exclude<Tier, 'free'>;
 
-function omiseAuth(): string {
-    const key = process.env.OMISE_SECRET_KEY || 'skey_test_69c6bljj347osxi0zk4c';
-    return 'Basic ' + Buffer.from(`${key}:`).toString('base64');
+interface TierInfo {
+    id: PaidTier;
+    name: string;
+    priceSatang: number;
+    menuLimit: number;
+    isStore: boolean;
+    perks: string[];
 }
 
-interface OmiseCharge {
-    id: string;
-    amount: number;
-    currency: string;
-    status: string;
-    paid: boolean;
-    expires_at?: string;
-    source?: {
-        scannable_code?: {
-            image?: { download_uri?: string };
-        };
+const TIERS: Record<PaidTier, TierInfo> = {
+    member: {
+        id: 'member',
+        name: 'สมาชิกระดับต้น',
+        priceSatang: 9900,
+        menuLimit: 0,
+        isStore: false,
+        perks: [
+            'จ่ายครั้งเดียว ใช้ได้ตลอด',
+            'ปิดโฆษณาทั้งหมด',
+            'อ่านรีวิวได้ไม่จำกัด',
+            'โพสต์รีวิว และให้คะแนนรีวิว',
+        ],
+    },
+    store: {
+        id: 'store',
+        name: 'สมาชิกระดับร้านค้า',
+        priceSatang: 29900,
+        menuLimit: 10,
+        isStore: true,
+        perks: [
+            'จ่ายครั้งเดียว ใช้ได้ตลอด',
+            'ทุกสิทธิ์ของสมาชิกระดับต้น',
+            'เพิ่มการมองเห็น (บูสต์รีวิว)',
+            'เข้าถึงรีวิว Exclusive',
+            'สร้างคูปองส่วนลด + คูปองกินฟรีรายเดือน',
+            'ลงประกาศขายสินค้า/อาหาร 10 เมนู',
+            'ต้องยืนยันตัวตนร้านค้า (แผนที่ + รูปหน้าร้าน)',
+        ],
+    },
+    store_vip: {
+        id: 'store_vip',
+        name: 'สมาชิกร้านค้า VIP',
+        priceSatang: 59900,
+        menuLimit: 20,
+        isStore: true,
+        perks: [
+            'จ่ายครั้งเดียว ใช้ได้ตลอด',
+            'ทุกสิทธิ์ของสมาชิกระดับร้านค้า',
+            'ลงประกาศขายสินค้า/อาหาร 20 เมนู',
+            'ต้องยืนยันตัวตนร้านค้า (แผนที่ + รูปหน้าร้าน)',
+        ],
+    },
+};
+
+const TIER_RANK: Record<Tier, number> = { free: 0, member: 1, store: 2, store_vip: 3 };
+const isPaidTier = (v: unknown): v is PaidTier =>
+    v === 'member' || v === 'store' || v === 'store_vip';
+const isStoreTier = (t: Tier) => t === 'store' || t === 'store_vip';
+
+interface Membership {
+    isVip: boolean;
+    tier: Tier;
+    tierName: string;
+    since: string | null;
+    menuLimit: number;
+    isStore: boolean;
+}
+
+async function getMembership(userId: string): Promise<Membership> {
+    let tier: Tier = 'free';
+    let since: string | null = null;
+
+    const rows = await query<{ tier: string; activated_at: string }>(
+        'SELECT tier, activated_at FROM memberships WHERE user_id=$1',
+        [userId]
+    );
+    if (rows[0] && isPaidTier(rows[0].tier)) {
+        tier = rows[0].tier;
+        since = rows[0].activated_at;
+    }
+
+    // สมาชิกจากระบบเดิม (Omise รายเดือน) ที่ยังไม่หมดอายุ: basic → ระดับต้น, premium → ร้านค้า
+    if (tier === 'free') {
+        try {
+            const legacy = await query<{ tier: string; current_period_start: string }>(
+                `SELECT COALESCE(pl.tier,'basic') AS tier, s.current_period_start
+                 FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id
+                 WHERE s.user_id=$1 AND s.status='active' AND s.current_period_end > now()
+                 ORDER BY (pl.tier='premium') DESC LIMIT 1`,
+                [userId]
+            );
+            if (legacy[0]) {
+                tier = legacy[0].tier === 'premium' ? 'store' : 'member';
+                since = legacy[0].current_period_start;
+            }
+        } catch {
+            /* ไม่มีตารางระบบเดิม */
+        }
+    }
+
+    return {
+        isVip: tier !== 'free',
+        tier,
+        tierName: tier === 'free' ? 'ผู้ใช้ทั่วไป' : TIERS[tier].name,
+        since,
+        menuLimit: tier === 'free' ? 0 : TIERS[tier].menuLimit,
+        isStore: isStoreTier(tier),
     };
 }
 
-async function createPromptPayCharge(
-    amountSatang: number,
-    metadata: Record<string, string>
-): Promise<OmiseCharge> {
-    const body = new URLSearchParams({
-        amount: String(amountSatang),
-        currency: 'thb',
-        'source[type]': 'promptpay',
-    });
-    for (const [k, v] of Object.entries(metadata)) body.set(`metadata[${k}]`, v);
+// ==================== USER FLAGS (บล็อก / เบอร์โทร) ====================
+const PHONE_RE = /^0[689]\d{8}$/;
+const maskPhone = (p: string | null) =>
+    p ? `${p.slice(0, 3)}-xxx-${p.slice(-4)}` : null;
 
-    const res = await fetch(`${OMISE_API}/charges`, {
-        method: 'POST',
-        headers: {
-            Authorization: omiseAuth(),
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body,
-    });
-    const json = await res.json();
-    if (!res.ok || json.object === 'error')
-        throw new Error(`Omise: ${json.message ?? res.status}`);
-    return json as OmiseCharge;
-}
-
-async function getCharge(id: string): Promise<OmiseCharge> {
-    const res = await fetch(`${OMISE_API}/charges/${encodeURIComponent(id)}`, {
-        headers: { Authorization: omiseAuth() },
-        cache: 'no-store',
-    });
-    const json = await res.json();
-    if (!res.ok || json.object === 'error')
-        throw new Error(`Omise: ${json.message ?? res.status}`);
-    return json as OmiseCharge;
-}
-
-// ==================== SETTLE CHARGE ====================
-async function settleCharge(charge: OmiseCharge): Promise<string | null> {
-    return withTx(async (c) => {
-        const found = await c.query(
-            'SELECT * FROM payments WHERE gateway_charge_id = $1 FOR UPDATE',
-            [charge.id]
+async function blockedResponse(uid: string): Promise<NextResponse | null> {
+    const r = await query<{ blocked_at: string | null; blocked_reason: string | null }>(
+        'SELECT blocked_at, blocked_reason FROM users WHERE id=$1',
+        [uid]
+    );
+    if (r[0]?.blocked_at) {
+        return NextResponse.json(
+            {
+                error: `บัญชีนี้ถูกระงับการใช้งานโดยแอดมิน${
+                    r[0].blocked_reason ? ` (${r[0].blocked_reason})` : ''
+                }`,
+                blocked: true,
+            },
+            { status: 403 }
         );
-        const p = found.rows[0];
-        if (!p) return null;
-        if (p.status !== 'pending') return p.status as string;
-
-        const amountOk =
-            charge.amount === p.amount_satang &&
-            charge.currency.toLowerCase() === 'thb';
-
-        if (charge.status === 'successful' && charge.paid && amountOk) {
-            await c.query(
-                `UPDATE payments SET status='succeeded', paid_at=now() WHERE id=$1`,
-                [p.id]
-            );
-
-            const subRes = await c.query(
-                `SELECT s.id, s.user_id, pl.interval_days
-                 FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id
-                 WHERE s.id = $1 FOR UPDATE`,
-                [p.ref_id]
-            );
-            const sub = subRes.rows[0];
-            if (sub) {
-                await c.query(
-                    `UPDATE subscriptions SET status='canceled'
-                     WHERE user_id=$1 AND status='active' AND id<>$2`,
-                    [sub.user_id, sub.id]
-                );
-                await c.query(
-                    `UPDATE subscriptions
-                     SET status='active', current_period_start=now(),
-                         current_period_end = now() + make_interval(days => $2)
-                     WHERE id=$1`,
-                    [sub.id, sub.interval_days]
-                );
-            }
-            await auditTx(c, 'system', 'payment_succeeded', {
-                paymentId: p.id,
-                charged: charge.id,
-                amount: p.amount_satang,
-            });
-            return 'succeeded';
-        }
-
-        if (charge.status === 'successful' && !amountOk) {
-            await auditTx(c, 'system', 'payment_amount_mismatch', {
-                paymentId: p.id,
-                charged: charge.id,
-                expected: p.amount_satang,
-                got: charge.amount,
-            });
-            return 'pending';
-        }
-
-        if (['failed', 'expired', 'reversed'].includes(charge.status)) {
-            await c.query(`UPDATE payments SET status='failed' WHERE id=$1`, [p.id]);
-            await c.query(
-                `UPDATE subscriptions SET status='canceled'
-                 WHERE id=$1 AND status='pending'`,
-                [p.ref_id]
-            );
-            await auditTx(c, 'system', 'payment_failed', {
-                paymentId: p.id,
-                charged: charge.id,
-                status: charge.status,
-            });
-            return 'failed';
-        }
-
-        return 'pending';
-    });
+    }
+    return null;
 }
 
-// ==================== HELPERS ====================
-type Tier = 'free' | 'basic' | 'premium';
+// ==================== PROMPTPAY QR (สร้างเอง ไม่ต้องใช้ API ธนาคาร) ====================
+const PROMPTPAY_ID = (process.env.PROMPTPAY_ID || '0638733553').replace(/\D/g, '');
 
-async function getMembership(userId: string): Promise<{
-    isVip: boolean;
-    planId: string | null;
-    periodEnd: string | null;
-    tier: Tier;
-}> {
-    const rows = await query<{
-        plan_id: string;
-        current_period_end: string;
-        tier: string;
-    }>(
-        `SELECT s.plan_id, s.current_period_end, COALESCE(pl.tier,'basic') AS tier
-         FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id
-         WHERE s.user_id=$1 AND s.status='active' AND s.current_period_end > now()
-         ORDER BY (pl.tier='premium') DESC, s.current_period_end DESC LIMIT 1`,
+async function buildPromptPayQr(amountBaht: number): Promise<string> {
+    const payload = generatePayload(PROMPTPAY_ID, { amount: amountBaht });
+    return QRCode.toDataURL(payload, { margin: 1, width: 480 });
+}
+
+// ==================== SLIP VERIFICATION (SlipOK) ====================
+interface SlipParty {
+    displayName?: string;
+    name?: string;
+    proxy?: { type?: string; value?: string } | null;
+    account?: { type?: string; value?: string } | null;
+}
+interface SlipOkData {
+    success?: boolean;
+    message?: string;
+    transRef?: string;
+    transTimestamp?: string;
+    amount?: number;
+    sender?: SlipParty;
+    receiver?: SlipParty;
+}
+
+const SLIPOK_ERRORS: Record<number, string> = {
+    1006: 'รูปภาพไม่ถูกต้อง',
+    1007: 'ไม่พบ QR Code ในรูปสลิป กรุณาแนบสลิปที่ชัดเจน',
+    1008: 'QR Code นี้ไม่ใช่สลิปโอนเงิน',
+    1010: 'ธนาคารยังไม่ยืนยันรายการ กรุณารอสักครู่แล้วลองใหม่',
+    1012: 'สลิปนี้ถูกใช้ไปแล้ว',
+    1013: 'ยอดเงินในสลิปไม่ตรงกับแพ็กเกจ',
+    1014: 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีของระบบ',
+};
+
+async function verifySlipWithSlipOk(
+    file: Blob,
+    amountBaht: number
+): Promise<{ ok: true; data: SlipOkData } | { ok: false; error: string }> {
+    const branch = process.env.SLIPOK_BRANCH_ID;
+    const key = process.env.SLIPOK_API_KEY;
+    if (!branch || !key)
+        return {
+            ok: false,
+            error: 'ระบบตรวจสลิปยังไม่ได้ตั้งค่า กรุณาติดต่อแอดมิน',
+        };
+
+    const fd = new FormData();
+    fd.append('files', file, 'slip.jpg');
+    fd.append('amount', String(amountBaht));
+    if (process.env.SLIPOK_LOG === 'true') fd.append('log', 'true');
+
+    let res: Response;
+    try {
+        res = await fetch(
+            `https://api.slipok.com/api/line/apikey/${encodeURIComponent(branch)}`,
+            {
+                method: 'POST',
+                headers: { 'x-authorization': key },
+                body: fd,
+                cache: 'no-store',
+            }
+        );
+    } catch (err) {
+        console.error('slipok fetch failed', err);
+        return { ok: false, error: 'เชื่อมต่อระบบตรวจสลิปไม่ได้ กรุณาลองใหม่' };
+    }
+    const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        code?: number;
+        message?: string;
+        data?: SlipOkData;
+    } | null;
+    if (!res.ok || !json?.success || !json.data?.success) {
+        const code = Number(json?.code);
+        return {
+            ok: false,
+            error:
+                SLIPOK_ERRORS[code] ??
+                (json?.message ? `ตรวจสลิปไม่ผ่าน: ${json.message}` : 'ตรวจสลิปไม่ผ่าน'),
+        };
+    }
+    return { ok: true, data: json.data };
+}
+
+const NAME_PREFIX = /^(นาย|นาง|นางสาว|น\.ส\.|mr\.?|mrs\.?|ms\.?|miss)$/i;
+
+/** ชื่อบัญชีผู้รับตรงไหม? (ป้องกันเอาสลิปที่โอนให้ร้านอื่นมาแนบ) */
+function receiverMatches(r: SlipParty | undefined): boolean {
+    if (!r) return false;
+    const hay = `${r.displayName ?? ''} ${r.name ?? ''}`.toLowerCase();
+
+    const words = (process.env.PROMPTPAY_RECEIVER_NAMES || '')
+        .toLowerCase()
+        .split(/[,\s]+/)
+        .map((w) => w.trim())
+        .filter((w) => w.length >= 2 && !NAME_PREFIX.test(w));
+    if (words.some((w) => hay.includes(w))) return true;
+
+    // เทียบเลข PromptPay / เลขบัญชี (ธนาคารปิดบางหลักไว้ จึงเทียบ 4 หลักท้าย)
+    const proxy = (r.proxy?.value ?? '').replace(/\D/g, '');
+    if (proxy.length >= 4 && proxy.endsWith(PROMPTPAY_ID.slice(-4))) return true;
+    const accLast = (process.env.PROMPTPAY_ACCOUNT_LAST_DIGITS || '').replace(/\D/g, '');
+    const acc = (r.account?.value ?? '').replace(/\D/g, '');
+    if (accLast.length >= 3 && acc.includes(accLast)) return true;
+    return false;
+}
+
+/** เปิดสิทธิ์สมาชิก (เลือกระดับที่สูงกว่าเสมอ) — ใช้ร่วมกันทั้งตรวจสลิปอัตโนมัติและแอดมินอนุมัติเอง */
+async function activateMembershipTx(
+    c: PoolClient,
+    userId: string,
+    tier: PaidTier,
+    orderId: string
+) {
+    const cur = await c.query(
+        'SELECT tier FROM memberships WHERE user_id=$1 FOR UPDATE',
         [userId]
     );
-    return rows[0]
-        ? {
-              isVip: true,
-              planId: rows[0].plan_id,
-              periodEnd: rows[0].current_period_end,
-              tier: rows[0].tier === 'premium' ? 'premium' : 'basic',
-          }
-        : { isVip: false, planId: null, periodEnd: null, tier: 'free' };
+    const curTier: Tier = isPaidTier(cur.rows[0]?.tier) ? cur.rows[0].tier : 'free';
+    if (!cur.rows[0]) {
+        await c.query(
+            'INSERT INTO memberships (user_id, tier, order_id) VALUES ($1,$2,$3)',
+            [userId, tier, orderId]
+        );
+    } else if (TIER_RANK[tier] > TIER_RANK[curTier]) {
+        await c.query(
+            'UPDATE memberships SET tier=$2, order_id=$3, updated_at=now() WHERE user_id=$1',
+            [userId, tier, orderId]
+        );
+    }
+}
+
+// ==================== CONTENT MODERATION ====================
+const DEFAULT_COVER =
+    'https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80';
+const BLOB_HOST_RE = /\.public\.blob\.vercel-storage\.com$/i;
+const SE_MODELS = 'nudity-2.1,recreational_drug,gambling,gore-2.0,violence';
+
+const VIOLATION_MSG = (label: string) =>
+    `⚠️ ตรวจพบเนื้อหาไม่เหมาะสม (${label}) — ระบบไม่อนุญาตให้นำเข้าภาพลามก ยาเสพติด การพนัน หรือข้อมูลอาชญากรรม/ความรุนแรง ซึ่งไม่เกี่ยวกับอาหาร ข้อมูลนี้จึงไม่ถูกบันทึก (หากฝ่าฝืนซ้ำ แอดมินอาจระงับบัญชี)`;
+
+/** คำต้องห้ามในข้อความ (ตรวจเบื้องต้น ก่อนบันทึก) */
+const BANNED_TEXT: { re: RegExp; label: string }[] = [
+    {
+        re: /(หนังโป๊|คลิปโป๊|คลิปหลุด|\bxxx\b|porn|onlyfans|เย็ด|ขายตัว|ไซด์ไลน์|sideline|ขายบริการทางเพศ)/i,
+        label: 'เนื้อหาลามก',
+    },
+    {
+        re: /(ยาบ้า|ยาไอซ์|เฮโรอีน|heroin|โคเคน|cocaine|ecstasy|เคตามีน|ketamine|methamphetamine|ขายยาเสพติด)/i,
+        label: 'ยาเสพติด',
+    },
+    {
+        re: /(บาคาร่า|baccarat|สล็อต|slot\s*online|แทงบอล|คาสิโน|casino|เว็บพนัน|พนันออนไลน์|หวยออนไลน์|ufabet|pgslot|เครดิตฟรี)/i,
+        label: 'การพนัน',
+    },
+    {
+        re: /(รับจ้างทำร้าย|รับจ้างฆ่า|ขายปืน|ปืนเถื่อน|ทำร้ายร่างกาย|ฆ่าคน)/i,
+        label: 'อาชญากรรม/ความรุนแรง',
+    },
+];
+
+function textViolation(...parts: (string | null | undefined)[]): string | null {
+    const s = parts.filter(Boolean).join(' ');
+    for (const b of BANNED_TEXT) if (b.re.test(s)) return VIOLATION_MSG(b.label);
+    return null;
+}
+
+type SeResult = {
+    status?: string;
+    error?: { message?: string };
+    nudity?: Record<string, unknown>;
+    recreational_drug?: { prob?: number };
+    gambling?: { prob?: number };
+    gore?: { prob?: number };
+    violence?: { prob?: number };
+    data?: { frames?: SeResult[] };
+};
+
+function seViolation(r: SeResult): string | null {
+    const n = r.nudity ?? {};
+    const nud = Math.max(
+        Number(n.sexual_activity ?? 0),
+        Number(n.sexual_display ?? 0),
+        Number(n.erotica ?? 0)
+    );
+    if (nud >= 0.5) return 'ภาพลามก/อนาจาร';
+    if ((r.recreational_drug?.prob ?? 0) >= 0.6) return 'ยาเสพติด';
+    if ((r.gambling?.prob ?? 0) >= 0.6) return 'การพนัน';
+    if ((r.gore?.prob ?? 0) >= 0.6 || (r.violence?.prob ?? 0) >= 0.6)
+        return 'ความรุนแรง/การทำร้ายร่างกาย';
+    return null;
+}
+
+const moderationEnabled = () =>
+    !!(process.env.SIGHTENGINE_API_USER && process.env.SIGHTENGINE_API_SECRET);
+
+/** ส่งภาพ/วิดีโอไปตรวจที่ Sightengine — คืนชื่อหมวดที่ผิด หรือ null ถ้าผ่าน */
+async function sightengineCheck(url: string, type: 'image' | 'video'): Promise<string | null> {
+    const params = new URLSearchParams({
+        models: SE_MODELS,
+        api_user: process.env.SIGHTENGINE_API_USER!,
+        api_secret: process.env.SIGHTENGINE_API_SECRET!,
+    });
+    let endpoint = 'https://api.sightengine.com/1.0/check.json';
+    if (type === 'video') {
+        endpoint = 'https://api.sightengine.com/1.0/video/check-sync.json';
+        params.set('stream_url', url);
+    } else {
+        params.set('url', url);
+    }
+    const res = await fetch(`${endpoint}?${params}`, { cache: 'no-store' });
+    const json = (await res.json().catch(() => null)) as SeResult | null;
+    if (!res.ok || json?.status !== 'success')
+        throw new Error(json?.error?.message ?? `sightengine ${res.status}`);
+    if (type === 'video') {
+        for (const f of json.data?.frames ?? []) {
+            const v = seViolation(f);
+            if (v) return v;
+        }
+        return null;
+    }
+    return seViolation(json);
+}
+
+let warnedNoModeration = false;
+
+type ModerationResult = { ok: true } | { ok: false; status: number; error: string };
+
+/** ตรวจไฟล์ทุกชิ้นก่อนบันทึก — ถ้าผิดกฎ: ลบไฟล์ทิ้ง, ขึ้นคำเตือน, ไม่บันทึกข้อมูล */
+async function moderateMedia(
+    items: MediaItem[],
+    actor: string,
+    ip: string,
+    skipUrls: Set<string> = new Set()
+): Promise<ModerationResult> {
+    for (const m of items) {
+        if (m.url === DEFAULT_COVER || skipUrls.has(m.url)) continue;
+        let host = '';
+        try {
+            host = new URL(m.url).hostname;
+        } catch {
+            /* invalid */
+        }
+        if (!BLOB_HOST_RE.test(host))
+            return {
+                ok: false,
+                status: 400,
+                error: 'รองรับเฉพาะรูป/วิดีโอที่อัปโหลดผ่านระบบเท่านั้น',
+            };
+
+        const cached = await query<{ ok: boolean; reason: string | null }>(
+            'SELECT ok, reason FROM media_checks WHERE url=$1',
+            [m.url]
+        );
+        if (cached[0]) {
+            if (!cached[0].ok)
+                return { ok: false, status: 422, error: VIOLATION_MSG(cached[0].reason ?? 'ไม่เหมาะสม') };
+            continue;
+        }
+
+        if (!moderationEnabled()) {
+            if (!warnedNoModeration) {
+                console.warn('SIGHTENGINE_API_USER/SECRET not set — media moderation is OFF');
+                warnedNoModeration = true;
+            }
+            continue;
+        }
+
+        let violation: string | null;
+        try {
+            violation = await sightengineCheck(m.url, m.type);
+        } catch (err) {
+            console.error('moderation failed', m.url, err);
+            return {
+                ok: false,
+                status: 503,
+                error:
+                    m.type === 'video'
+                        ? 'ตรวจสอบวิดีโอไม่สำเร็จ (วิดีโอต้องยาวไม่เกิน 60 วินาที) กรุณาลองใหม่'
+                        : 'ระบบตรวจสอบเนื้อหาขัดข้องชั่วคราว กรุณาลองใหม่',
+            };
+        }
+
+        await query(
+            `INSERT INTO media_checks (url, ok, reason) VALUES ($1,$2,$3)
+             ON CONFLICT (url) DO UPDATE SET ok=EXCLUDED.ok, reason=EXCLUDED.reason, checked_at=now()`,
+            [m.url, !violation, violation]
+        );
+        if (violation) {
+            await del(m.url).catch(() => undefined);
+            await audit(actor, 'media_rejected', { url: m.url, reason: violation }, ip);
+            return { ok: false, status: 422, error: VIOLATION_MSG(violation) };
+        }
+    }
+    return { ok: true };
 }
 
 // ==================== MEDIA VALIDATION ====================
@@ -474,165 +831,330 @@ async function h_me_GET(req: NextRequest) {
     if (!userId)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
 
-    const [membership, plans] = await Promise.all([
+    const [membership, users, stores] = await Promise.all([
         getMembership(userId),
-        query(
-            `SELECT id, name, price_satang, interval_days, perks, tier
-             FROM plans WHERE active ORDER BY price_satang`
+        query<{
+            display_name: string | null;
+            phone: string | null;
+            terms_accepted_at: string | null;
+            blocked_at: string | null;
+            blocked_reason: string | null;
+        }>(
+            `SELECT display_name, phone, terms_accepted_at, blocked_at, blocked_reason
+             FROM users WHERE id=$1`,
+            [userId]
+        ),
+        query<{ status: string; store_name: string; admin_note: string | null }>(
+            'SELECT status, store_name, admin_note FROM store_profiles WHERE user_id=$1',
+            [userId]
         ),
     ]);
+    const u = users[0];
     return NextResponse.json({
         membership,
-        plans,
+        tiers: Object.values(TIERS),
         isAdmin: isAdminReq(req),
+        profile: {
+            displayName: u?.display_name ?? null,
+            phoneMasked: maskPhone(u?.phone ?? null),
+            hasPhone: !!u?.phone,
+            termsAccepted: !!u?.terms_accepted_at,
+            blocked: !!u?.blocked_at,
+            blockedReason: u?.blocked_reason ?? null,
+        },
+        store: stores[0] ?? null,
     });
 }
 
-// ==================== ROUTE: subscriptions ====================
-async function h_subscriptions_POST(req: NextRequest) {
+// ==================== ROUTE: membership/checkout ====================
+// สร้างรายการสั่งซื้อ + QR PromptPay พร้อมยอดเงิน (เก็บเบอร์โทรจริง + การยอมรับเงื่อนไข)
+async function h_membership_checkout_POST(req: NextRequest) {
     const uid = getUserId(req);
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
 
     const body = await req.json().catch(() => ({}));
-    const plans = await query<{ id: string; price_satang: number }>(
-        `SELECT id, price_satang FROM plans WHERE id=$1 AND active`,
-        [body?.planId]
-    );
-    const plan = plans[0];
-    if (!plan)
+    const tier = body?.tier;
+    if (!isPaidTier(tier))
         return NextResponse.json({ error: 'ไม่พบแพ็กเกจ' }, { status: 400 });
+    const info = TIERS[tier];
 
-    const recent = await query<{ n: number }>(
-        `SELECT COUNT(*)::int AS n FROM payments
-         WHERE user_id=$1 AND status='pending' AND created_at > now() - interval '1 hour'`,
+    const m = await getMembership(uid);
+    if (TIER_RANK[m.tier] >= TIER_RANK[tier])
+        return NextResponse.json(
+            { error: `คุณมีสิทธิ์ ${m.tierName} อยู่แล้ว` },
+            { status: 400 }
+        );
+
+    const phone = String(body?.phone ?? '').replace(/\D/g, '');
+    if (!PHONE_RE.test(phone))
+        return NextResponse.json(
+            { error: 'กรุณากรอกเบอร์มือถือจริง 10 หลัก (เช่น 08x-xxx-xxxx)' },
+            { status: 400 }
+        );
+    if (body?.acceptTerms !== true)
+        return NextResponse.json(
+            { error: 'กรุณาอ่านและยอมรับเงื่อนไขการใช้งาน' },
+            { status: 400 }
+        );
+    const displayName = str(body?.displayName, 50);
+    const badName = textViolation(displayName);
+    if (badName) return NextResponse.json({ error: badName }, { status: 422 });
+
+    const taken = await query<{ blocked_at: string | null }>(
+        'SELECT blocked_at FROM users WHERE phone=$1 AND id<>$2',
+        [phone, uid]
+    );
+    if (taken[0])
+        return NextResponse.json(
+            {
+                error: taken[0].blocked_at
+                    ? 'เบอร์โทรนี้ถูกระงับการใช้งาน'
+                    : 'เบอร์โทรนี้ถูกใช้สมัครสมาชิกแล้ว',
+            },
+            { status: 409 }
+        );
+
+    if (info.isStore) {
+        const sp = await query<{ status: string }>(
+            'SELECT status FROM store_profiles WHERE user_id=$1',
+            [uid]
+        );
+        if (!sp[0])
+            return NextResponse.json(
+                { error: 'กรุณากรอกข้อมูลยืนยันตัวตนร้านค้า (แผนที่ + รูปหน้าร้าน) ก่อนชำระเงิน', needStore: true },
+                { status: 400 }
+            );
+        if (sp[0].status === 'rejected')
+            return NextResponse.json(
+                { error: 'ข้อมูลร้านค้าไม่ผ่านการตรวจสอบ กรุณาแก้ไขแล้วส่งใหม่', needStore: true },
+                { status: 400 }
+            );
+    }
+
+    const [recent] = await query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM membership_orders
+         WHERE user_id=$1 AND created_at > now() - interval '1 hour'`,
         [uid]
     );
-    if (recent[0].n >= 3) {
+    if (recent.n >= 5)
         return NextResponse.json(
-            { error: 'มีรายการชำระหลายรายการ กรุณารอสักครู่' },
+            { error: 'สร้างรายการบ่อยเกินไป กรุณารอสักครู่' },
             { status: 429 }
         );
-    }
-
-    const { subId, paymentId } = await withTx(async (c) => {
-        const s = await c.query(
-            `INSERT INTO subscriptions (user_id, plan_id, status)
-             VALUES ($1,$2,'pending') RETURNING id`,
-            [uid, plan.id]
-        );
-        const p = await c.query(
-            `INSERT INTO payments (user_id, kind, ref_id, amount_satang, status, gateway)
-             VALUES ($1,'subscription',$2,$3,'pending','omise') RETURNING id`,
-            [uid, s.rows[0].id, plan.price_satang]
-        );
-        return {
-            subId: s.rows[0].id as string,
-            paymentId: p.rows[0].id as string,
-        };
-    });
 
     try {
-        const charge = await createPromptPayCharge(plan.price_satang, {
-            payment_id: paymentId,
-            subscription_id: subId,
-        });
-        await query(`UPDATE payments SET gateway_charge_id=$1 WHERE id=$2`, [
-            charge.id,
-            paymentId,
-        ]);
-        return NextResponse.json({
-            paymentId,
-            planId: plan.id,
-            amountSatang: plan.price_satang,
-            qrImageUrl:
-                charge.source?.scannable_code?.image?.download_uri ?? null,
-            expiresAt: charge.expires_at ?? null,
-        });
-    } catch (err) {
-        console.error('create charge failed', err);
-        await query(`UPDATE payments SET status='failed' WHERE id=$1`, [paymentId]);
-        await query(`UPDATE subscriptions SET status='canceled' WHERE id=$1`, [
-            subId,
-        ]);
-        return NextResponse.json(
-            { error: 'สร้างรายการชำระเงินไม่สำเร็จ กรุณาลองใหม่' },
-            { status: 502 }
+        await query(
+            `UPDATE users SET phone=$2,
+                    terms_accepted_at = COALESCE(terms_accepted_at, now()),
+                    display_name = COALESCE(NULLIF($3,''), display_name)
+             WHERE id=$1`,
+            [uid, phone, displayName]
         );
+    } catch (err) {
+        if ((err as { code?: string }).code === '23505')
+            return NextResponse.json(
+                { error: 'เบอร์โทรนี้ถูกใช้สมัครสมาชิกแล้ว' },
+                { status: 409 }
+            );
+        throw err;
     }
+
+    const [order] = await query<{ id: string; created_at: string }>(
+        `INSERT INTO membership_orders (user_id, tier, amount_satang)
+         VALUES ($1,$2,$3) RETURNING id, created_at`,
+        [uid, tier, info.priceSatang]
+    );
+    const qrDataUrl = await buildPromptPayQr(info.priceSatang / 100);
+    await audit(uid, 'membership_order_created', { orderId: order.id, tier }, ipHash(req));
+
+    return NextResponse.json({
+        orderId: order.id,
+        tier,
+        tierName: info.name,
+        amountSatang: info.priceSatang,
+        qrDataUrl,
+        promptpayId: maskPhone(PROMPTPAY_ID),
+        expiresAt: new Date(Date.parse(order.created_at) + 24 * 3600_000).toISOString(),
+    });
 }
 
-// ==================== ROUTE: subscriptions/status ====================
-async function h_subscriptions_status_GET(req: NextRequest) {
+// ==================== ROUTE: membership/verify (แนบสลิป) ====================
+const MAX_SLIP_BYTES = 4 * 1024 * 1024;
+
+async function h_membership_verify_POST(req: NextRequest) {
     const uid = getUserId(req);
     if (!uid)
-        return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
 
-    const paymentId = req.nextUrl.searchParams.get('paymentId');
-    if (!isUuid(paymentId))
-        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const form = await req.formData().catch(() => null);
+    const orderId = form?.get('orderId');
+    const slip = form?.get('slip');
+    if (!isUuid(orderId) || !(slip instanceof Blob) || slip.size === 0)
+        return NextResponse.json({ error: 'กรุณาแนบรูปสลิปการโอนเงิน' }, { status: 400 });
+    if (slip.size > MAX_SLIP_BYTES)
+        return NextResponse.json({ error: 'รูปสลิปใหญ่เกิน 4MB' }, { status: 400 });
+    if (slip.type && !slip.type.startsWith('image/'))
+        return NextResponse.json({ error: 'ไฟล์สลิปต้องเป็นรูปภาพ' }, { status: 400 });
 
     const rows = await query<{
+        id: string;
+        tier: string;
+        amount_satang: number;
         status: string;
-        gateway_charge_id: string | null;
+        created_at: string;
+        verify_attempts: number;
     }>(
-        `SELECT status, gateway_charge_id FROM payments WHERE id=$1 AND user_id=$2`,
-        [paymentId, uid]
+        `SELECT id, tier, amount_satang, status, created_at, verify_attempts
+         FROM membership_orders WHERE id=$1 AND user_id=$2`,
+        [orderId, uid]
     );
-    const p = rows[0];
-    if (!p) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    const order = rows[0];
+    if (!order) return NextResponse.json({ error: 'ไม่พบรายการ' }, { status: 404 });
+    if (order.status === 'succeeded')
+        return NextResponse.json({ ok: true, status: 'succeeded' });
+    if (order.status !== 'pending' || !isPaidTier(order.tier))
+        return NextResponse.json(
+            { error: 'รายการนี้หมดอายุแล้ว กรุณาเริ่มสมัครใหม่' },
+            { status: 400 }
+        );
+    if (order.verify_attempts >= 10)
+        return NextResponse.json(
+            { error: 'แนบสลิปเกินจำนวนครั้งที่กำหนด กรุณาติดต่อแอดมิน' },
+            { status: 429 }
+        );
+    await query(
+        'UPDATE membership_orders SET verify_attempts = verify_attempts + 1 WHERE id=$1',
+        [order.id]
+    );
 
-    if (p.status === 'pending' && p.gateway_charge_id) {
-        try {
-            const status = await settleCharge(
-                await getCharge(p.gateway_charge_id)
-            );
-            return NextResponse.json({ status: status ?? p.status });
-        } catch (err) {
-            console.error('status check failed', err);
-        }
-    }
-    return NextResponse.json({ status: p.status });
+    const ip = ipHash(req);
+    const fail = async (error: string, status = 400) => {
+        await audit(uid, 'slip_rejected', { orderId: order.id, error }, ip);
+        return NextResponse.json({ error }, { status });
+    };
+
+    // 1) ส่งรูปไปให้ Slip API ตรวจ (รูปสลิปไม่ถูกเก็บไว้ที่ใดเลย — ประหยัดพื้นที่)
+    const v = await verifySlipWithSlipOk(slip, order.amount_satang / 100);
+    if (!v.ok) return fail(v.error);
+    const d = v.data;
+
+    // 2) ยอดเงินตรงไหม?
+    const paid = Math.round(Number(d.amount) * 100);
+    if (paid !== order.amount_satang)
+        return fail(
+            `ยอดเงินในสลิป (${Number(d.amount).toLocaleString()} บาท) ไม่ตรงกับแพ็กเกจ (${order.amount_satang / 100} บาท)`
+        );
+
+    // 3) ชื่อบัญชีผู้รับตรงไหม?
+    if (!receiverMatches(d.receiver))
+        return fail('บัญชีผู้รับในสลิปไม่ตรงกับบัญชีของระบบ');
+
+    // 4) ต้องเป็นการโอนหลังสร้างรายการ (กันเอาสลิปเก่ามาใช้)
+    const t = d.transTimestamp ? Date.parse(d.transTimestamp) : NaN;
+    if (Number.isFinite(t) && t < Date.parse(order.created_at) - 10 * 60_000)
+        return fail('สลิปนี้เป็นการโอนก่อนสร้างรายการชำระเงิน');
+
+    // 5) สลิปนี้เคยใช้หรือยัง? (เช็ค Ref Number กับ Database)
+    const ref = String(d.transRef ?? '').trim();
+    if (!ref) return fail('อ่านเลขอ้างอิงจากสลิปไม่ได้');
+
+    const result = await withTx(async (c) => {
+        const dup = await c.query(
+            'SELECT 1 FROM membership_orders WHERE slip_ref=$1',
+            [ref]
+        );
+        if (dup.rows[0]) return 'duplicate' as const;
+        const upd = await c.query(
+            `UPDATE membership_orders
+             SET status='succeeded', paid_at=now(), slip_ref=$2, slip_sender=$3
+             WHERE id=$1 AND status='pending' RETURNING id`,
+            [order.id, ref, str(d.sender?.displayName ?? d.sender?.name, 120) || null]
+        );
+        if (!upd.rows[0]) return 'not_pending' as const;
+        await activateMembershipTx(c, uid, order.tier as PaidTier, order.id);
+        await auditTx(c, uid, 'membership_activated', {
+            orderId: order.id,
+            tier: order.tier,
+            amount: order.amount_satang,
+            ref,
+        }, ip);
+        return 'ok' as const;
+    }).catch((err) => {
+        if ((err as { code?: string }).code === '23505') return 'duplicate' as const;
+        throw err;
+    });
+
+    if (result === 'duplicate') return fail('สลิปนี้ถูกใช้ไปแล้ว', 409);
+    if (result === 'not_pending')
+        return NextResponse.json({ error: 'รายการนี้ถูกดำเนินการแล้ว' }, { status: 409 });
+
+    return NextResponse.json({
+        ok: true,
+        status: 'succeeded',
+        tier: order.tier,
+        tierName: TIERS[order.tier as PaidTier].name,
+    });
 }
 
-// ==================== ROUTE: webhooks/omise ====================
-async function h_webhooks_omise_POST(req: NextRequest) {
-    const event = await req.json().catch(() => null);
-    if (event?.key !== 'charge.complete' || typeof event?.data?.id !== 'string') {
-        return NextResponse.json({ ok: true });
-    }
-    try {
-        const charge = await getCharge(event.data.id);
-        await settleCharge(charge);
-        return NextResponse.json({ ok: true });
-    } catch (err) {
-        console.error('omise webhook error', err);
-        return NextResponse.json({ error: 'retry' }, { status: 500 });
-    }
+// ==================== ROUTE: moderate (ตรวจไฟล์ทันทีหลังอัปโหลด) ====================
+async function h_moderate_POST(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
+    const body = await req.json().catch(() => ({}));
+    const items = parseMediaItems([body]);
+    if (!items[0]) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const r = await moderateMedia(items, uid, ipHash(req));
+    if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status });
+    return NextResponse.json({ ok: true });
 }
 
 // ==================== ROUTE: reviews ====================
+const FREE_REVIEW_LIMIT = 20;
+
 async function h_reviews_GET(req: NextRequest) {
     const uid = getUserId(req);
-    let isVip = false;
-    if (uid) {
-        const m = await getMembership(uid);
-        isVip = m.isVip;
-    }
+    const m = uid ? await getMembership(uid) : null;
+    const tier: Tier = m?.tier ?? 'free';
+    const admin = isAdminReq(req);
+    const canSeeExclusive = isStoreTier(tier) || admin;
 
-    const limit = Math.min(
-        Math.max(parseInt(req.nextUrl.searchParams.get('limit') ?? '20', 10), 1),
+    let limit = Math.min(
+        Math.max(parseInt(req.nextUrl.searchParams.get('limit') ?? '20', 10) || 20, 1),
         50
     );
     const offset = Math.max(
-        parseInt(req.nextUrl.searchParams.get('offset') ?? '0', 10),
+        parseInt(req.nextUrl.searchParams.get('offset') ?? '0', 10) || 0,
         0
     );
+    // ผู้ใช้ทั่วไปอ่านได้จำกัด — สมาชิกอ่านรีวิวได้ไม่จำกัด
+    const limited = tier === 'free' && !admin;
+    if (limited) limit = Math.min(limit, Math.max(FREE_REVIEW_LIMIT - offset, 0));
 
-    const rows = await query(
+    const [total] = await query<{ n: number }>(
+        'SELECT COUNT(*)::int AS n FROM restaurants'
+    );
+    if (limit === 0)
+        return NextResponse.json({
+            reviews: [],
+            isVip: m?.isVip ?? false,
+            tier,
+            limited,
+            freeLimit: FREE_REVIEW_LIMIT,
+            total: total.n,
+        });
+
+    const rows = await query<Record<string, unknown> & { is_exclusive: boolean }>(
         `SELECT r.id, r.name, r.category, r.rating, r.rating_count, r.must_try, r.tags,
                 r.media_items, r.reviewer_name, r.view_count, r.created_at,
-                r.latitude, r.longitude, r.address, r.recommender_name,
+                r.latitude, r.longitude, r.address, r.recommender_name, r.is_exclusive,
                 (r.boosted_until IS NOT NULL AND r.boosted_until > now()) AS boosted,
                 ($3::uuid IS NOT NULL AND r.reviewer_id = $3::uuid) AS is_mine,
                 (SELECT score FROM review_ratings rr
@@ -641,23 +1163,56 @@ async function h_reviews_GET(req: NextRequest) {
                     SELECT json_agg(json_build_object(
                         'id', p.id, 'title', p.title, 'description', p.description,
                         'coupon_code', p.coupon_code, 'discount_text', p.discount_text,
-                        'ends_at', p.ends_at) ORDER BY p.ends_at)
+                        'ends_at', p.ends_at, 'kind', p.kind, 'quota', p.quota,
+                        'claimed_count', p.claimed_count,
+                        'my_code', (SELECT pc.code FROM promotion_claims pc
+                                    WHERE pc.promotion_id = p.id AND pc.user_id = $3::uuid))
+                        ORDER BY p.ends_at)
                     FROM promotions p
                     WHERE p.restaurant_id = r.id AND now() BETWEEN p.starts_at AND p.ends_at
                 ), '[]'::json) AS promotions
          FROM restaurants r
+         LEFT JOIN users ru ON ru.id = r.reviewer_id
+         WHERE ru.blocked_at IS NULL
          ORDER BY (r.boosted_until IS NOT NULL AND r.boosted_until > now()) DESC,
                   r.view_count DESC, r.created_at DESC
          LIMIT $1 OFFSET $2`,
         [limit, offset, uid]
     );
-    return NextResponse.json({ reviews: rows, isVip });
+
+    // รีวิว Exclusive: เห็นเต็มเฉพาะสมาชิกระดับร้านค้าขึ้นไป
+    const reviews = rows.map((r) =>
+        r.is_exclusive && !canSeeExclusive
+            ? {
+                  ...r,
+                  name: '🔒 รีวิว Exclusive',
+                  must_try: 'เนื้อหานี้สำหรับสมาชิกระดับร้านค้าขึ้นไป',
+                  media_items: [],
+                  address: null,
+                  latitude: null,
+                  longitude: null,
+                  recommender_name: null,
+                  promotions: [],
+                  exclusive_locked: true,
+              }
+            : r
+    );
+    return NextResponse.json({
+        reviews,
+        isVip: m?.isVip ?? false,
+        tier,
+        limited,
+        freeLimit: FREE_REVIEW_LIMIT,
+        total: total.n,
+    });
 }
 
 async function h_reviews_POST(req: NextRequest) {
     const uid = getUserId(req);
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
 
     const body = await req.json().catch(() => ({}));
     const name =
@@ -695,6 +1250,19 @@ async function h_reviews_POST(req: NextRequest) {
             { status: 400 }
         );
     }
+
+    // ตรวจข้อความ + ภาพ/วิดีโอ ก่อนบันทึก (ผิดกฎ → เตือนและไม่บันทึก)
+    const badText = textViolation(name, category, mustTry, address, recommenderName);
+    if (badText) {
+        await audit(uid, 'review_rejected_text', { name }, ipHash(req));
+        return NextResponse.json({ error: badText }, { status: 422 });
+    }
+    const mod = await moderateMedia(
+        mediaUrl ? [...mediaItems, { type: mediaType, url: mediaUrl }] : mediaItems,
+        uid,
+        ipHash(req)
+    );
+    if (!mod.ok) return NextResponse.json({ error: mod.error }, { status: mod.status });
 
     const users = await query<{ display_name: string }>(
         'SELECT display_name FROM users WHERE id=$1',
@@ -744,14 +1312,18 @@ async function h_reviews_id_PATCH(
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
 
-    const owners = await query<{ reviewer_id: string | null }>(
-        'SELECT reviewer_id FROM restaurants WHERE id=$1',
+    const owners = await query<{ reviewer_id: string | null; media_items: unknown }>(
+        'SELECT reviewer_id, media_items FROM restaurants WHERE id=$1',
         [id]
     );
     if (!owners[0])
         return NextResponse.json({ error: 'not found' }, { status: 404 });
 
     const isAdmin = isAdminReq(req);
+    if (!isAdmin) {
+        const blocked = await blockedResponse(uid);
+        if (blocked) return blocked;
+    }
     if (owners[0].reviewer_id !== uid && !isAdmin) {
         return NextResponse.json(
             { error: 'คุณไม่ใช่เจ้าของรีวิวนี้ — กรุณาส่งคำขอให้แอดมิน' },
@@ -776,6 +1348,18 @@ async function h_reviews_id_PATCH(
             { status: 400 }
         );
     }
+
+    const badText = textViolation(name, category, mustTry);
+    if (badText) return NextResponse.json({ error: badText }, { status: 422 });
+    const existing = new Set(
+        parseMediaItems(
+            typeof owners[0].media_items === 'string'
+                ? JSON.parse(owners[0].media_items as string)
+                : owners[0].media_items
+        ).map((x) => x.url)
+    );
+    const mod = await moderateMedia(mediaItems, isAdmin ? 'admin' : uid, ipHash(req), existing);
+    if (!mod.ok) return NextResponse.json({ error: mod.error }, { status: mod.status });
 
     const firstMedia = mediaItems[0];
     const mediaType = firstMedia?.type ?? 'image';
@@ -872,6 +1456,10 @@ async function h_reviews_id_edit_request_POST(
     const body = await req.json().catch(() => ({}));
     const reason =
         typeof body?.reason === 'string' ? body.reason.trim().slice(0, 500) : '';
+    const blockedEr = await blockedResponse(uid);
+    if (blockedEr) return blockedEr;
+    const badEr = textViolation(reason, body?.name, body?.mustTry);
+    if (badEr) return NextResponse.json({ error: badEr }, { status: 422 });
     if (!reason || reason.length < 5) {
         return NextResponse.json(
             { error: 'กรุณาระบุเหตุผล (อย่างน้อย 5 ตัวอักษร)' },
@@ -986,6 +1574,8 @@ async function h_reviews_id_rate_POST(
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
 
+    const blockedRt = await blockedResponse(uid);
+    if (blockedRt) return blockedRt;
     const m = await getMembership(uid);
     if (m.tier === 'free') {
         return NextResponse.json(
@@ -1075,10 +1665,12 @@ async function h_reviews_id_boost_POST(
     const uid = getUserId(req);
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blockedSt = await blockedResponse(uid);
+    if (blockedSt) return blockedSt;
     const m = await getMembership(uid);
-    if (m.tier !== 'premium')
+    if (!m.isStore)
         return NextResponse.json(
-            { error: 'ฟีเจอร์นี้สำหรับสมาชิกระดับสูง (Premium)' },
+            { error: 'ฟีเจอร์นี้สำหรับสมาชิกระดับร้านค้า' },
             { status: 403 }
         );
 
@@ -1117,10 +1709,12 @@ async function h_promotions_POST(req: NextRequest) {
     const uid = getUserId(req);
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blockedSt = await blockedResponse(uid);
+    if (blockedSt) return blockedSt;
     const m = await getMembership(uid);
-    if (m.tier !== 'premium')
+    if (!m.isStore)
         return NextResponse.json(
-            { error: 'ฟีเจอร์นี้สำหรับสมาชิกระดับสูง (Premium)' },
+            { error: 'ฟีเจอร์นี้สำหรับสมาชิกระดับร้านค้า' },
             { status: 403 }
         );
 
@@ -1131,6 +1725,13 @@ async function h_promotions_POST(req: NextRequest) {
     const couponCode = str(b?.couponCode, 40).toUpperCase();
     const discountText = str(b?.discountText, 60);
     const days = Math.min(Math.max(parseInt(String(b?.days ?? '7'), 10) || 7, 1), 90);
+    const kind = b?.kind === 'free_meal' ? 'free_meal' : 'discount';
+    const quota =
+        kind === 'free_meal'
+            ? Math.min(Math.max(parseInt(String(b?.quota ?? '10'), 10) || 10, 1), 200)
+            : null;
+    const badPromo = textViolation(title, description, discountText);
+    if (badPromo) return NextResponse.json({ error: badPromo }, { status: 422 });
 
     if (!restaurantId || !title)
         return NextResponse.json(
@@ -1164,10 +1765,26 @@ async function h_promotions_POST(req: NextRequest) {
             { status: 429 }
         );
 
+    // คูปองกินฟรี: สร้างได้เดือนละ 1 แคมเปญต่อร้าน (นับตามเวลาไทย)
+    if (kind === 'free_meal') {
+        const [fm] = await query<{ n: number }>(
+            `SELECT COUNT(*)::int AS n FROM promotions
+             WHERE owner_id=$1 AND kind='free_meal'
+               AND date_trunc('month', created_at AT TIME ZONE 'Asia/Bangkok')
+                 = date_trunc('month', now() AT TIME ZONE 'Asia/Bangkok')`,
+            [uid]
+        );
+        if (fm.n >= 1)
+            return NextResponse.json(
+                { error: 'สร้างคูปองกินฟรีได้เดือนละ 1 แคมเปญ' },
+                { status: 429 }
+            );
+    }
+
     const [row] = await query<{ id: string }>(
         `INSERT INTO promotions
-         (restaurant_id, owner_id, title, description, coupon_code, discount_text, ends_at)
-         VALUES ($1,$2,$3,$4,$5,$6, now() + make_interval(days => $7)) RETURNING id`,
+         (restaurant_id, owner_id, title, description, coupon_code, discount_text, ends_at, kind, quota)
+         VALUES ($1,$2,$3,$4,$5,$6, now() + make_interval(days => $7), $8, $9) RETURNING id`,
         [
             restaurantId,
             uid,
@@ -1175,7 +1792,9 @@ async function h_promotions_POST(req: NextRequest) {
             description || null,
             couponCode || null,
             discountText || null,
-            days,
+            kind === 'free_meal' ? Math.min(days, 31) : days,
+            kind,
+            quota,
         ]
     );
     await audit(uid, 'promotion_created', { promotionId: row.id, restaurantId }, ipHash(req));
@@ -1278,8 +1897,13 @@ async function h_admin_summary_GET(req: NextRequest) {
          WHERE status='paid'`
     );
     const [active] = await query<{ n: number }>(
-        `SELECT COUNT(*)::int AS n FROM subscriptions
-         WHERE status='active' AND current_period_end > now()`
+        `SELECT (SELECT COUNT(*) FROM subscriptions
+                  WHERE status='active' AND current_period_end > now())::int
+              + (SELECT COUNT(*) FROM memberships)::int AS n`
+    );
+    const [mem] = await query<{ total: string }>(
+        `SELECT COALESCE(SUM(amount_satang), 0) AS total FROM membership_orders
+         WHERE status='succeeded'`
     );
     const [payouts] = await query<{ total: string }>(
         `SELECT COALESCE(SUM(amount_satang), 0) AS total FROM payouts
@@ -1320,7 +1944,7 @@ async function h_admin_summary_GET(req: NextRequest) {
          FROM audit_logs ORDER BY id DESC LIMIT 50`
     );
 
-    const subsTotal = Number(subs.total);
+    const subsTotal = Number(subs.total) + Number(mem.total);
     const invTotal = Number(inv.total);
     const payoutTotal = Number(payouts.total);
 
@@ -1567,10 +2191,16 @@ async function h_admin_sponsorship_invoices_paid_POST(
  *   อัตราต่อ 2,000 วิว = 100–200 บาท ตามคะแนนเฉลี่ย (1★ = 100, 5★ = 200, ยังไม่มีคะแนน = ขั้นต่ำ)
  *   ค่าตอบแทน = (วิวในรอบ / 2,000) × อัตรา × ส่วนแบ่ง 20–40%
  */
+// ปรับแก้: ไม่มีการสร้างรายได้ให้ผู้ใช้ทั่วไป — ซ่อนระบบแบ่งรายได้ไว้ (เปิดได้ด้วย PAYOUTS_ENABLED=true)
+const PAYOUTS_ENABLED = process.env.PAYOUTS_ENABLED === 'true';
+const payoutsDisabled = () =>
+    NextResponse.json({ error: 'ระบบแบ่งรายได้ถูกปิดใช้งาน' }, { status: 404 });
+
 const VIEWS_PER_UNIT = 2000;
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 
 async function h_admin_run_payout_POST(req: NextRequest) {
+    if (!PAYOUTS_ENABLED) return payoutsDisabled();
     if (!isAdminReq(req))
         return NextResponse.json({ error: 'forbidden' }, { status: 403 });
 
@@ -1746,6 +2376,7 @@ async function h_admin_payouts_id_PATCH(
     req: NextRequest,
     { params }: { params: Promise<{ id: string }> }
 ) {
+    if (!PAYOUTS_ENABLED) return payoutsDisabled();
     if (!isAdminReq(req))
         return NextResponse.json({ error: 'forbidden' }, { status: 403 });
 
@@ -1940,6 +2571,7 @@ async function h_admin_review_requests_id_PATCH(
 
 // ==================== ROUTE: me/payouts ====================
 async function h_me_payouts_GET(req: NextRequest) {
+    if (!PAYOUTS_ENABLED) return payoutsDisabled();
     const uid = getUserId(req);
     if (!uid)
         return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
@@ -2014,6 +2646,11 @@ async function h_cron_daily_GET(req: NextRequest) {
     );
 
     await query(
+        `UPDATE membership_orders SET status='expired'
+         WHERE status='pending' AND created_at < now() - interval '2 days'`
+    );
+
+    await query(
         `UPDATE sponsorships SET status='expired'
          WHERE status='active' AND ends_at < now()`
     );
@@ -2039,19 +2676,588 @@ async function h_cron_daily_GET(req: NextRequest) {
     return NextResponse.json({ ok: true });
 }
 
+// ==================== ROUTE: store/profile (ยืนยันตัวตนร้านค้า) ====================
+// ป้องกันผู้ใช้ทั่วไปจ่ายเงินสวมรอยมาสแปมประกาศขายของ: ต้องมีแผนที่ร้าน + รูปหน้าร้าน และแอดมินอนุมัติ
+function httpUrl(v: unknown, max = 500): string {
+    const s = str(v, max);
+    if (!s) return '';
+    try {
+        const u = new URL(s);
+        return u.protocol === 'https:' || u.protocol === 'http:' ? s : '';
+    } catch {
+        return '';
+    }
+}
+
+async function h_store_profile_POST(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
+
+    const b = await req.json().catch(() => ({}));
+    const storeName = str(b?.storeName, 120);
+    const mapUrl = httpUrl(b?.mapUrl);
+    const lat = Number.isFinite(Number(b?.latitude)) && b?.latitude !== null && b?.latitude !== '' ? Number(b.latitude) : null;
+    const lng = Number.isFinite(Number(b?.longitude)) && b?.longitude !== null && b?.longitude !== '' ? Number(b.longitude) : null;
+    const address = str(b?.address, 300);
+    const storefrontUrl = str(b?.storefrontUrl, 500);
+    const contactPhone = String(b?.contactPhone ?? '').replace(/[^\d]/g, '').slice(0, 10);
+
+    if (!storeName)
+        return NextResponse.json({ error: 'กรุณากรอกชื่อร้าน' }, { status: 400 });
+    if (!mapUrl && (lat === null || lng === null))
+        return NextResponse.json(
+            { error: 'กรุณาระบุตำแหน่งร้าน (ลิงก์ Google Maps หรือกดใช้ GPS)' },
+            { status: 400 }
+        );
+    if (!storefrontUrl)
+        return NextResponse.json({ error: 'กรุณาอัปโหลดรูปหน้าร้าน' }, { status: 400 });
+
+    const bad = textViolation(storeName, address);
+    if (bad) return NextResponse.json({ error: bad }, { status: 422 });
+    const mod = await moderateMedia([{ type: 'image', url: storefrontUrl }], uid, ipHash(req));
+    if (!mod.ok) return NextResponse.json({ error: mod.error }, { status: mod.status });
+
+    await query(
+        `INSERT INTO store_profiles
+            (user_id, store_name, map_url, latitude, longitude, address, storefront_url, contact_phone, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')
+         ON CONFLICT (user_id) DO UPDATE SET
+            store_name=EXCLUDED.store_name, map_url=EXCLUDED.map_url,
+            latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,
+            address=EXCLUDED.address, storefront_url=EXCLUDED.storefront_url,
+            contact_phone=EXCLUDED.contact_phone,
+            status='pending', admin_note=NULL, reviewed_at=NULL, updated_at=now()`,
+        [uid, storeName, mapUrl || null, lat, lng, address || null, storefrontUrl, contactPhone || null]
+    );
+    await audit(uid, 'store_profile_submitted', { storeName }, ipHash(req));
+    return NextResponse.json({ ok: true, status: 'pending' });
+}
+
+// ==================== ROUTE: me/store ====================
+async function h_me_store_GET(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const [m, profiles, listings] = await Promise.all([
+        getMembership(uid),
+        query(
+            `SELECT store_name, map_url, latitude, longitude, address, storefront_url,
+                    contact_phone, status, admin_note, updated_at
+             FROM store_profiles WHERE user_id=$1`,
+            [uid]
+        ),
+        query(
+            `SELECT id, title, price_satang, description, image_url, active, created_at
+             FROM store_listings WHERE owner_id=$1 ORDER BY created_at DESC`,
+            [uid]
+        ),
+    ]);
+    return NextResponse.json({
+        profile: profiles[0] ?? null,
+        listings,
+        menuLimit: m.menuLimit,
+        isStore: m.isStore,
+    });
+}
+
+// ==================== ROUTE: listings (ประกาศขายสินค้า/อาหาร) ====================
+async function h_listings_GET(req: NextRequest) {
+    const uid = getUserId(req);
+    const rows = await query(
+        `SELECT l.id, l.title, l.price_satang, l.description, l.image_url, l.created_at,
+                sp.store_name, sp.latitude, sp.longitude, sp.address, sp.map_url,
+                ($1::uuid IS NOT NULL AND l.owner_id = $1::uuid) AS is_mine
+         FROM store_listings l
+         JOIN store_profiles sp ON sp.user_id = l.owner_id AND sp.status = 'approved'
+         JOIN users u ON u.id = l.owner_id AND u.blocked_at IS NULL
+         WHERE l.active
+         ORDER BY l.created_at DESC LIMIT 60`,
+        [uid]
+    );
+    return NextResponse.json({ listings: rows });
+}
+
+function parseListing(b: Record<string, unknown> | null) {
+    const title = str(b?.title, 120);
+    const description = str(b?.description, 500);
+    const priceBaht = Number(b?.priceBaht);
+    const priceSatang =
+        b?.priceBaht === '' || b?.priceBaht == null || !Number.isFinite(priceBaht)
+            ? null
+            : Math.round(Math.min(Math.max(priceBaht, 0), 100000) * 100);
+    const imageUrl = str(b?.imageUrl, 500);
+    return { title, description, priceSatang, imageUrl };
+}
+
+async function storeGate(uid: string): Promise<NextResponse | { menuLimit: number }> {
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
+    const m = await getMembership(uid);
+    if (!m.isStore)
+        return NextResponse.json(
+            { error: 'ลงประกาศขายได้เฉพาะสมาชิกระดับร้านค้า' },
+            { status: 403 }
+        );
+    const sp = await query<{ status: string }>(
+        'SELECT status FROM store_profiles WHERE user_id=$1',
+        [uid]
+    );
+    if (sp[0]?.status !== 'approved')
+        return NextResponse.json(
+            { error: 'ร้านค้าของคุณยังไม่ผ่านการยืนยันตัวตนจากแอดมิน' },
+            { status: 403 }
+        );
+    return { menuLimit: m.menuLimit };
+}
+
+async function h_listings_POST(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const gate = await storeGate(uid);
+    if (gate instanceof NextResponse) return gate;
+
+    const l = parseListing(await req.json().catch(() => null));
+    if (!l.title)
+        return NextResponse.json({ error: 'กรุณากรอกชื่อสินค้า/เมนู' }, { status: 400 });
+    const bad = textViolation(l.title, l.description);
+    if (bad) return NextResponse.json({ error: bad }, { status: 422 });
+    if (l.imageUrl) {
+        const mod = await moderateMedia([{ type: 'image', url: l.imageUrl }], uid, ipHash(req));
+        if (!mod.ok) return NextResponse.json({ error: mod.error }, { status: mod.status });
+    }
+
+    const [cnt] = await query<{ n: number }>(
+        'SELECT COUNT(*)::int AS n FROM store_listings WHERE owner_id=$1 AND active',
+        [uid]
+    );
+    if (cnt.n >= gate.menuLimit)
+        return NextResponse.json(
+            { error: `ลงประกาศได้สูงสุด ${gate.menuLimit} เมนูตามระดับสมาชิก` },
+            { status: 429 }
+        );
+
+    const [row] = await query<{ id: string }>(
+        `INSERT INTO store_listings (owner_id, title, price_satang, description, image_url)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        [uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null]
+    );
+    await audit(uid, 'listing_created', { listingId: row.id }, ipHash(req));
+    return NextResponse.json({ ok: true, id: row.id });
+}
+
+async function h_listings_id_PATCH(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const gate = await storeGate(uid);
+    if (gate instanceof NextResponse) return gate;
+
+    const own = await query<{ image_url: string | null; active: boolean }>(
+        'SELECT image_url, active FROM store_listings WHERE id=$1 AND owner_id=$2',
+        [id, uid]
+    );
+    if (!own[0]) return NextResponse.json({ error: 'not found' }, { status: 404 });
+
+    const body = await req.json().catch(() => null);
+    const l = parseListing(body);
+    const active = typeof body?.active === 'boolean' ? body.active : own[0].active;
+    if (!l.title)
+        return NextResponse.json({ error: 'กรุณากรอกชื่อสินค้า/เมนู' }, { status: 400 });
+    const bad = textViolation(l.title, l.description);
+    if (bad) return NextResponse.json({ error: bad }, { status: 422 });
+    if (l.imageUrl && l.imageUrl !== own[0].image_url) {
+        const mod = await moderateMedia([{ type: 'image', url: l.imageUrl }], uid, ipHash(req));
+        if (!mod.ok) return NextResponse.json({ error: mod.error }, { status: mod.status });
+    }
+    if (active && !own[0].active) {
+        const [cnt] = await query<{ n: number }>(
+            'SELECT COUNT(*)::int AS n FROM store_listings WHERE owner_id=$1 AND active',
+            [uid]
+        );
+        if (cnt.n >= gate.menuLimit)
+            return NextResponse.json(
+                { error: `ลงประกาศได้สูงสุด ${gate.menuLimit} เมนูตามระดับสมาชิก` },
+                { status: 429 }
+            );
+    }
+    await query(
+        `UPDATE store_listings SET title=$3, price_satang=$4, description=$5,
+                image_url=$6, active=$7, updated_at=now()
+         WHERE id=$1 AND owner_id=$2`,
+        [id, uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null, active]
+    );
+    return NextResponse.json({ ok: true });
+}
+
+async function h_listings_id_DELETE(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const uid = getUserId(req);
+    const admin = isAdminReq(req);
+    if (!uid && !admin)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const rows = await query(
+        `DELETE FROM store_listings WHERE id=$1 AND (owner_id=$2::uuid OR $3) RETURNING id`,
+        [id, uid, admin]
+    );
+    if (!rows[0]) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    await audit(admin ? 'admin' : uid!, 'listing_deleted', { listingId: id }, ipHash(req));
+    return NextResponse.json({ ok: true });
+}
+
+// ==================== ROUTE: promotions/:id/claim (คูปองกินฟรี) ====================
+async function h_promotions_id_claim_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
+    if (isBotUA(req))
+        return NextResponse.json({ error: 'ตรวจพบการใช้งานอัตโนมัติ' }, { status: 403 });
+    const ip = ipHash(req);
+
+    const result = await withTx(async (c) => {
+        const p = await c.query(
+            `SELECT id, owner_id, quota, claimed_count FROM promotions
+             WHERE id=$1 AND kind='free_meal' AND now() BETWEEN starts_at AND ends_at
+             FOR UPDATE`,
+            [id]
+        );
+        const promo = p.rows[0];
+        if (!promo) return { status: 404, error: 'คูปองนี้หมดอายุหรือไม่มีอยู่' };
+        if (promo.owner_id === uid)
+            return { status: 403, error: 'ไม่สามารถรับคูปองของร้านตัวเองได้' };
+        const mine = await c.query(
+            'SELECT code FROM promotion_claims WHERE promotion_id=$1 AND user_id=$2',
+            [id, uid]
+        );
+        if (mine.rows[0]) return { status: 200, code: mine.rows[0].code as string };
+        const sameIp = await c.query(
+            'SELECT 1 FROM promotion_claims WHERE promotion_id=$1 AND ip_hash=$2',
+            [id, ip]
+        );
+        if (sameIp.rows[0])
+            return { status: 409, error: 'อุปกรณ์นี้รับคูปองนี้ไปแล้ว' };
+        if (promo.quota != null && promo.claimed_count >= promo.quota)
+            return { status: 409, error: 'คูปองกินฟรีเดือนนี้ถูกรับครบแล้ว' };
+
+        const code = 'FREE-' + crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 6);
+        await c.query(
+            `INSERT INTO promotion_claims (promotion_id, user_id, ip_hash, code)
+             VALUES ($1,$2,$3,$4)`,
+            [id, uid, ip, code]
+        );
+        await c.query(
+            'UPDATE promotions SET claimed_count = claimed_count + 1 WHERE id=$1',
+            [id]
+        );
+        await auditTx(c, uid, 'free_meal_claimed', { promotionId: id, code }, ip);
+        return { status: 200, code };
+    });
+
+    if (result.status !== 200)
+        return NextResponse.json({ error: result.error }, { status: result.status });
+    return NextResponse.json({ ok: true, code: result.code });
+}
+
+// ==================== ROUTE: reports (แจ้งเนื้อหาผิดกฎหมาย) ====================
+async function h_reports_POST(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const b = await req.json().catch(() => ({}));
+    const targetType = b?.targetType === 'listing' ? 'listing' : b?.targetType === 'review' ? 'review' : null;
+    const targetId = isUuid(b?.targetId) ? b.targetId : null;
+    const reason = str(b?.reason, 300);
+    if (!targetType || !targetId)
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    if (reason.length < 3)
+        return NextResponse.json({ error: 'กรุณาระบุเหตุผลที่แจ้ง' }, { status: 400 });
+
+    const [today] = await query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM content_reports
+         WHERE reporter_id=$1 AND created_at > now() - interval '1 day'`,
+        [uid]
+    );
+    if (today.n >= 20)
+        return NextResponse.json({ error: 'แจ้งบ่อยเกินไป กรุณารอสักครู่' }, { status: 429 });
+
+    const dup = await query(
+        `SELECT 1 FROM content_reports
+         WHERE reporter_id=$1 AND target_type=$2 AND target_id=$3 AND status='open'`,
+        [uid, targetType, targetId]
+    );
+    if (dup[0]) return NextResponse.json({ ok: true, duplicate: true });
+
+    await query(
+        `INSERT INTO content_reports (target_type, target_id, reporter_id, reason)
+         VALUES ($1,$2,$3,$4)`,
+        [targetType, targetId, uid, reason]
+    );
+    await audit(uid, 'content_reported', { targetType, targetId, reason }, ipHash(req));
+    return NextResponse.json({ ok: true });
+}
+
+// ==================== ADMIN: moderation ====================
+function forbidden() {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+}
+
+async function h_admin_stores_GET(req: NextRequest) {
+    if (!isAdminReq(req)) return forbidden();
+    const status = req.nextUrl.searchParams.get('status') ?? 'pending';
+    const rows = await query(
+        `SELECT sp.user_id, sp.store_name, sp.map_url, sp.latitude, sp.longitude, sp.address,
+                sp.storefront_url, sp.contact_phone, sp.status, sp.admin_note,
+                sp.created_at, sp.updated_at, u.phone, u.blocked_at,
+                m.tier AS membership_tier
+         FROM store_profiles sp
+         JOIN users u ON u.id = sp.user_id
+         LEFT JOIN memberships m ON m.user_id = sp.user_id
+         WHERE ($1 = 'all' OR sp.status = $1)
+         ORDER BY sp.updated_at DESC LIMIT 100`,
+        [status]
+    );
+    return NextResponse.json({ stores: rows });
+}
+
+async function h_admin_stores_id_PATCH(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    const action = b?.action;
+    if (action !== 'approve' && action !== 'reject')
+        return NextResponse.json({ error: 'bad action' }, { status: 400 });
+    const rows = await query(
+        `UPDATE store_profiles SET status=$2, admin_note=$3, reviewed_at=now(), updated_at=now()
+         WHERE user_id=$1 RETURNING user_id`,
+        [id, action === 'approve' ? 'approved' : 'rejected', str(b?.note, 300) || null]
+    );
+    if (!rows[0]) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    await audit('admin', `store_${action}d`, { userId: id }, ipHash(req));
+    return NextResponse.json({ ok: true });
+}
+
+async function h_admin_reports_GET(req: NextRequest) {
+    if (!isAdminReq(req)) return forbidden();
+    const status = req.nextUrl.searchParams.get('status') ?? 'open';
+    const rows = await query(
+        `SELECT cr.id, cr.target_type, cr.target_id, cr.reason, cr.status, cr.admin_note,
+                cr.created_at,
+                COALESCE(r.name, l.title) AS target_title,
+                COALESCE(r.reviewer_id, l.owner_id) AS owner_id,
+                (SELECT blocked_at IS NOT NULL FROM users WHERE id = COALESCE(r.reviewer_id, l.owner_id)) AS owner_blocked
+         FROM content_reports cr
+         LEFT JOIN restaurants r ON cr.target_type='review' AND r.id = cr.target_id
+         LEFT JOIN store_listings l ON cr.target_type='listing' AND l.id = cr.target_id
+         WHERE ($1 = 'all' OR cr.status = $1)
+         ORDER BY cr.created_at DESC LIMIT 100`,
+        [status]
+    );
+    return NextResponse.json({ reports: rows });
+}
+
+async function h_admin_reports_id_PATCH(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    const reportId = Number(id);
+    if (!Number.isInteger(reportId))
+        return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    const status = b?.status === 'dismissed' ? 'dismissed' : 'resolved';
+    await query(
+        `UPDATE content_reports SET status=$2, admin_note=$3, resolved_at=now() WHERE id=$1`,
+        [reportId, status, str(b?.note, 300) || null]
+    );
+    return NextResponse.json({ ok: true });
+}
+
+async function h_admin_users_GET(req: NextRequest) {
+    if (!isAdminReq(req)) return forbidden();
+    const q = (req.nextUrl.searchParams.get('q') ?? '').replace(/[^\d]/g, '');
+    const rows = await query(
+        `SELECT u.id, u.display_name, u.phone, u.terms_accepted_at, u.blocked_at, u.blocked_reason,
+                m.tier AS membership_tier, m.activated_at
+         FROM users u LEFT JOIN memberships m ON m.user_id = u.id
+         WHERE ($1 <> '' AND u.phone LIKE '%' || $1 || '%')
+            OR ($1 = '' AND (u.blocked_at IS NOT NULL OR m.user_id IS NOT NULL))
+         ORDER BY COALESCE(u.blocked_at, m.activated_at) DESC NULLS LAST LIMIT 100`,
+        [q]
+    );
+    return NextResponse.json({ users: rows });
+}
+
+async function h_admin_users_id_block_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    const reason = str(b?.reason, 200) || 'ละเมิดเงื่อนไขการใช้งาน';
+    const deleteContent = b?.deleteContent === true;
+
+    await withTx(async (c) => {
+        await c.query(
+            'UPDATE users SET blocked_at=now(), blocked_reason=$2 WHERE id=$1',
+            [id, reason]
+        );
+        await c.query('UPDATE store_listings SET active=false WHERE owner_id=$1', [id]);
+        if (deleteContent) {
+            await c.query('DELETE FROM restaurants WHERE reviewer_id=$1', [id]);
+            await c.query('DELETE FROM store_listings WHERE owner_id=$1', [id]);
+            await c.query('DELETE FROM promotions WHERE owner_id=$1', [id]);
+        }
+        await auditTx(c, 'admin', 'user_blocked', { userId: id, reason, deleteContent }, ipHash(req));
+    });
+    return NextResponse.json({ ok: true });
+}
+
+async function h_admin_users_id_unblock_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    await query('UPDATE users SET blocked_at=NULL, blocked_reason=NULL WHERE id=$1', [id]);
+    await audit('admin', 'user_unblocked', { userId: id }, ipHash(req));
+    return NextResponse.json({ ok: true });
+}
+
+async function h_admin_reviews_id_exclusive_PATCH(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    await query('UPDATE restaurants SET is_exclusive=$2 WHERE id=$1', [id, b?.exclusive === true]);
+    return NextResponse.json({ ok: true });
+}
+
+async function h_admin_membership_orders_GET(req: NextRequest) {
+    if (!isAdminReq(req)) return forbidden();
+    const status = req.nextUrl.searchParams.get('status') ?? 'pending';
+    const rows = await query(
+        `SELECT o.id, o.user_id, o.tier, o.amount_satang, o.status, o.slip_ref, o.slip_sender,
+                o.verify_attempts, o.created_at, o.paid_at, u.phone
+         FROM membership_orders o JOIN users u ON u.id = o.user_id
+         WHERE ($1 = 'all' OR o.status = $1)
+         ORDER BY o.created_at DESC LIMIT 100`,
+        [status]
+    );
+    return NextResponse.json({ orders: rows });
+}
+
+/** แอดมินอนุมัติเอง (กรณีระบบตรวจสลิปขัดข้อง แต่ตรวจสอบยอดเข้าบัญชีแล้ว) */
+async function h_admin_membership_orders_id_approve_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    const ref = str(b?.ref, 60) || null;
+    const res = await withTx(async (c) => {
+        const o = await c.query(
+            `UPDATE membership_orders SET status='succeeded', paid_at=now(), slip_ref=$2
+             WHERE id=$1 AND status IN ('pending','expired') RETURNING user_id, tier`,
+            [id, ref]
+        );
+        const row = o.rows[0];
+        if (!row || !isPaidTier(row.tier)) return false;
+        await activateMembershipTx(c, row.user_id, row.tier, id);
+        await auditTx(c, 'admin', 'membership_manual_approved', { orderId: id, ref }, ipHash(req));
+        return true;
+    });
+    if (!res) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    return NextResponse.json({ ok: true });
+}
+
 // ==================== DISPATCHER ====================
 type RouteCtx = { params: Promise<{ path?: string[] }> };
 
 type StaticRoute = (req: NextRequest, ctx: RouteCtx) => Promise<Response>;
+
+type IdRoute = (
+    req: NextRequest,
+    ctx: { params: Promise<{ id: string }> }
+) => Promise<Response>;
+
+/** เส้นทางที่มี :id — pattern ใช้ ':id' แทนตำแหน่งของ id */
+const ID_ROUTES: { method: string; pattern: string[]; handler: IdRoute }[] = [
+    { method: 'PATCH', pattern: ['listings', ':id'], handler: h_listings_id_PATCH },
+    { method: 'DELETE', pattern: ['listings', ':id'], handler: h_listings_id_DELETE },
+    { method: 'POST', pattern: ['promotions', ':id', 'claim'], handler: h_promotions_id_claim_POST },
+    { method: 'PATCH', pattern: ['admin', 'stores', ':id'], handler: h_admin_stores_id_PATCH },
+    { method: 'PATCH', pattern: ['admin', 'reports', ':id'], handler: h_admin_reports_id_PATCH },
+    { method: 'POST', pattern: ['admin', 'users', ':id', 'block'], handler: h_admin_users_id_block_POST },
+    { method: 'POST', pattern: ['admin', 'users', ':id', 'unblock'], handler: h_admin_users_id_unblock_POST },
+    { method: 'PATCH', pattern: ['admin', 'reviews', ':id', 'exclusive'], handler: h_admin_reviews_id_exclusive_PATCH },
+    { method: 'POST', pattern: ['admin', 'membership_orders', ':id', 'approve'], handler: h_admin_membership_orders_id_approve_POST },
+];
+
+function matchIdRoute(method: string, path: string[]) {
+    for (const r of ID_ROUTES) {
+        if (r.method !== method || r.pattern.length !== path.length) continue;
+        let id: string | null = null;
+        const ok = r.pattern.every((seg, i) => {
+            if (seg === ':id') {
+                id = path[i];
+                return true;
+            }
+            return seg === path[i];
+        });
+        if (ok && id !== null) return { handler: r.handler, id: id as string };
+    }
+    return null;
+}
 
 const STATIC_ROUTES: Record<string, StaticRoute> = {
     'POST auth/guest': h_auth_guest_POST as StaticRoute,
     'GET me': h_me_GET as StaticRoute,
     'GET me/payouts': h_me_payouts_GET as StaticRoute,
     'GET me/review_requests': h_me_review_requests_GET as StaticRoute,
-    'POST subscriptions': h_subscriptions_POST as StaticRoute,
-    'GET subscriptions/status': h_subscriptions_status_GET as StaticRoute,
-    'POST webhooks/omise': h_webhooks_omise_POST as StaticRoute,
+    'POST membership/checkout': h_membership_checkout_POST as StaticRoute,
+    'POST membership/verify': h_membership_verify_POST as StaticRoute,
+    'POST moderate': h_moderate_POST as StaticRoute,
+    'GET me/store': h_me_store_GET as StaticRoute,
+    'POST store/profile': h_store_profile_POST as StaticRoute,
+    'GET listings': h_listings_GET as StaticRoute,
+    'POST listings': h_listings_POST as StaticRoute,
+    'POST reports': h_reports_POST as StaticRoute,
+    'GET admin/stores': h_admin_stores_GET as StaticRoute,
+    'GET admin/reports': h_admin_reports_GET as StaticRoute,
+    'GET admin/users': h_admin_users_GET as StaticRoute,
+    'GET admin/membership_orders': h_admin_membership_orders_GET as StaticRoute,
     'GET reviews': h_reviews_GET as StaticRoute,
     'POST reviews': h_reviews_POST as StaticRoute,
     'POST promotions': h_promotions_POST as StaticRoute,
@@ -2077,6 +3283,12 @@ async function dispatch(
         const key = `${method} ${path.join('/')}`;
         const fn = STATIC_ROUTES[key];
         if (fn) return await fn(req, ctx);
+
+        const idRoute = matchIdRoute(method, path);
+        if (idRoute)
+            return await idRoute.handler(req, {
+                params: Promise.resolve({ id: idRoute.id }),
+            });
 
         // PATCH /api/reviews/:id
         if (

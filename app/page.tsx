@@ -1,28 +1,30 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { upload as blobUpload } from '@vercel/blob/client';
+import {
+    api,
+    baht,
+    uploadMedia,
+    type MediaItem,
+    type Membership,
+    type StoreStatus,
+    type TierInfo,
+    type UserProfile,
+} from './lib/client';
+import { POST_RULE } from './lib/terms';
+import MembershipModal from './components/MembershipModal';
+import StoreDashboard from './components/StoreDashboard';
+import MarketSection from './components/MarketSection';
+import ReportModal, { type ReportTarget } from './components/ReportModal';
+import AdminModeration from './components/AdminModeration';
 
 // ==================== Types ====================
-interface Plan {
-    id: string;
-    name: string;
-    price_satang: number;
-    interval_days: number;
-    perks: string[];
-}
-
-interface Membership {
-    isVip: boolean;
-    planId: string | null;
-    periodEnd: string | null;
-    tier?: 'free' | 'basic' | 'premium';
-}
-
 interface MeResponse {
     membership: Membership;
-    plans: Plan[];
+    tiers: TierInfo[];
     isAdmin: boolean;
+    profile: UserProfile;
+    store: StoreStatus | null;
 }
 
 interface Sponsorship {
@@ -34,19 +36,6 @@ interface Sponsorship {
     badge_text: string;
     target_url: string;
     restaurant_name: string | null;
-}
-
-interface Checkout {
-    paymentId: string;
-    planId: string;
-    amountSatang: number;
-    qrImageUrl: string | null;
-    expiresAt: string | null;
-}
-
-interface MediaItem {
-    type: 'image' | 'video';
-    url: string;
 }
 
 interface Review {
@@ -69,6 +58,8 @@ interface Review {
     is_mine?: boolean;
     my_score?: number | null;
     promotions?: Promotion[];
+    is_exclusive?: boolean;
+    exclusive_locked?: boolean;
 }
 
 interface Promotion {
@@ -78,6 +69,10 @@ interface Promotion {
     coupon_code: string | null;
     discount_text: string | null;
     ends_at: string;
+    kind?: 'discount' | 'free_meal';
+    quota?: number | null;
+    claimed_count?: number;
+    my_code?: string | null;
 }
 
 // ==================== Categories / Sharing / In-app ====================
@@ -119,67 +114,6 @@ function detectInApp(ua: string): boolean {
 }
 
 const isMobileUA = (ua: string) => /Android|iPhone|iPad|iPod/i.test(ua);
-
-// ==================== Media upload helpers ====================
-const MAX_VIDEO_MB = 200;
-
-/** ย่อรูปในเบราว์เซอร์ก่อนอัปโหลด (กว้าง/สูงไม่เกิน 1920px, JPEG 85%) */
-async function compressImage(file: File): Promise<File> {
-    if (!file.type.startsWith('image/') || file.type === 'image/gif') return file;
-    try {
-        const bitmap = await createImageBitmap(file);
-        const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height));
-        const w = Math.round(bitmap.width * scale);
-        const h = Math.round(bitmap.height * scale);
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return file;
-        ctx.drawImage(bitmap, 0, 0, w, h);
-        bitmap.close?.();
-        const blob = await new Promise<Blob | null>((res) =>
-            canvas.toBlob(res, 'image/jpeg', 0.85)
-        );
-        if (!blob || blob.size >= file.size) return file;
-        const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
-        return new File([blob], name, { type: 'image/jpeg' });
-    } catch {
-        return file; // เช่น HEIC ที่เบราว์เซอร์อ่านไม่ได้ → อัปโหลดไฟล์เดิม
-    }
-}
-
-/** อัปโหลดตรงจากเบราว์เซอร์ไป Vercel Blob (ไม่ติดลิมิต 4.5MB, รองรับวิดีโอ) */
-async function uploadMedia(original: File): Promise<MediaItem> {
-    const isVideo = original.type.startsWith('video/');
-    if (!isVideo && !original.type.startsWith('image/'))
-        throw new Error(`ไฟล์ ${original.name} ไม่ใช่รูปภาพหรือวิดีโอ`);
-    if (isVideo && original.size > MAX_VIDEO_MB * 1024 * 1024)
-        throw new Error(`วิดีโอใหญ่เกิน ${MAX_VIDEO_MB}MB`);
-
-    const file = isVideo ? original : await compressImage(original);
-    const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-60) || 'file';
-    try {
-        const blob = await blobUpload(`kinjing/${Date.now()}-${safe}`, file, {
-            access: 'public',
-            handleUploadUrl: '/api/upload',
-            contentType: file.type || undefined,
-            multipart: file.size > 8 * 1024 * 1024,
-        });
-        return { type: isVideo ? 'video' : 'image', url: blob.url };
-    } catch (err) {
-        // ดึงข้อความจากเซิร์ฟเวอร์ (เช่น ยังไม่ได้ต่อ Blob)
-        const probe = await fetch('/api/upload', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: '{}',
-        }).catch(() => null);
-        const data = probe ? await probe.json().catch(() => null) : null;
-        if (probe?.status === 503 && data?.error) throw new Error(data.error);
-        console.error(err);
-        throw new Error(`อัพโหลด ${original.name} ไม่สำเร็จ`);
-    }
-}
 
 declare global {
     interface Window {
@@ -324,12 +258,6 @@ interface AdminSummary {
 }
 
 // ==================== Helpers ====================
-const baht = (satang: number) =>
-    `\u0E3F${(satang / 100).toLocaleString('th-TH', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-    })}`;
-
 const fmtDate = (s: string | null) =>
     s
         ? new Date(s).toLocaleDateString('th-TH', {
@@ -347,27 +275,6 @@ const fmtDateTime = (s: string) =>
 
 const DEFAULT_START_DATE = '2026-01-01';
 const DEFAULT_END_DATE = '2026-01-31';
-
-async function api<T>(
-    path: string,
-    init?: RequestInit
-): Promise<{ ok: boolean; status: number; data: T | null }> {
-    try {
-        const res = await fetch(path, {
-            credentials: 'same-origin',
-            cache: 'no-store',
-            ...init,
-            headers: {
-                'Content-Type': 'application/json',
-                ...(init?.headers || {}),
-            },
-        });
-        const data = (await res.json().catch(() => null)) as T | null;
-        return { ok: res.ok, status: res.status, data };
-    } catch {
-        return { ok: false, status: 0, data: null };
-    }
-}
 
 function parseMediaItems(raw: MediaItem[] | string | null): MediaItem[] {
     if (!raw) return [];
@@ -404,6 +311,8 @@ const PAYOUT_STATUS: Record<string, string> = {
 };
 
 const MAX_MEDIA_ITEMS = 10;
+/** ปรับแก้: ไม่มีการสร้างรายได้ให้ผู้ใช้ทั่วไป — ซ่อนระบบแบ่งรายได้ไว้ */
+const PAYOUTS_ENABLED = false;
 
 // ==================== Main Component ====================
 export default function Home() {
@@ -411,10 +320,24 @@ export default function Home() {
     const [ready, setReady] = useState(false);
     const [membership, setMembership] = useState<Membership>({
         isVip: false,
-        planId: null,
-        periodEnd: null,
+        tier: 'free',
+        tierName: 'ผู้ใช้ทั่วไป',
+        since: null,
+        menuLimit: 0,
+        isStore: false,
     });
-    const [plans, setPlans] = useState<Plan[]>([]);
+    const [tiers, setTiers] = useState<TierInfo[]>([]);
+    const [profile, setProfile] = useState<UserProfile | null>(null);
+    const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
+    const [showStoreDashboard, setShowStoreDashboard] = useState(false);
+    const [showModeration, setShowModeration] = useState(false);
+    const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+    const [marketKey, setMarketKey] = useState(0);
+    const [reviewsMeta, setReviewsMeta] = useState({
+        limited: false,
+        total: 0,
+        freeLimit: 20,
+    });
     const [isAdmin, setIsAdmin] = useState(false);
     const [toast, setToast] = useState<string | null>(null);
     const [myPayouts, setMyPayouts] = useState<Payout[]>([]);
@@ -426,11 +349,6 @@ export default function Home() {
     // --- VIP ---
     const [showVipModal, setShowVipModal] = useState(false);
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-    const [checkout, setCheckout] = useState<Checkout | null>(null);
-    const [checkoutState, setCheckoutState] = useState<
-        'waiting' | 'succeeded' | 'failed'
-    >('waiting');
-    const [creatingCheckout, setCreatingCheckout] = useState(false);
 
     // --- Sponsorship ---
     const [sponsorship, setSponsorship] = useState<Sponsorship | null>(null);
@@ -565,9 +483,12 @@ export default function Home() {
         couponCode: '',
         discountText: '',
         days: '7',
+        kind: 'discount' as 'discount' | 'free_meal',
+        quota: '10',
     });
 
-    const tier = membership.tier ?? (membership.isVip ? 'basic' : 'free');
+    const tier = membership.tier;
+    const canStoreTools = membership.isStore;
 
     useEffect(() => {
         setIsInApp(detectInApp(navigator.userAgent));
@@ -582,7 +503,9 @@ export default function Home() {
         const r = await api<MeResponse>('/api/me');
         if (r.ok && r.data) {
             setMembership(r.data.membership);
-            setPlans(r.data.plans);
+            setTiers(r.data.tiers);
+            setProfile(r.data.profile);
+            setStoreStatus(r.data.store);
             setIsAdmin(r.data.isAdmin);
         }
     }, []);
@@ -604,8 +527,20 @@ export default function Home() {
 
     const refreshReviews = useCallback(async () => {
         setReviewsLoading(true);
-        const r = await api<{ reviews: Review[] }>('/api/reviews?limit=30');
-        if (r.ok && r.data) setReviews(r.data.reviews);
+        const r = await api<{
+            reviews: Review[];
+            limited: boolean;
+            total: number;
+            freeLimit: number;
+        }>('/api/reviews?limit=50');
+        if (r.ok && r.data) {
+            setReviews(r.data.reviews);
+            setReviewsMeta({
+                limited: r.data.limited,
+                total: r.data.total,
+                freeLimit: r.data.freeLimit,
+            });
+        }
         setReviewsLoading(false);
     }, []);
 
@@ -641,10 +576,11 @@ export default function Home() {
     useEffect(() => {
         if (!ready) return;
         refreshSponsorship();
-    }, [ready, membership.isVip, refreshSponsorship]);
+        refreshReviews();
+    }, [ready, membership.tier, membership.isVip, refreshSponsorship, refreshReviews]);
 
     useEffect(() => {
-        if (!ready) return;
+        if (!ready || !PAYOUTS_ENABLED) return;
         refreshPayouts();
     }, [ready, refreshPayouts]);
 
@@ -691,55 +627,6 @@ export default function Home() {
         }
     }, []);
 
-    const paymentId = checkout?.paymentId;
-    useEffect(() => {
-        if (!paymentId) return;
-        let stopped = false;
-        const startedAt = Date.now();
-        const timer = setInterval(async () => {
-            if (stopped) return;
-            if (Date.now() - startedAt > 15 * 60_000) {
-                clearInterval(timer);
-                return;
-            }
-            const r = await api<{ status: string }>(
-                `/api/subscriptions/status?paymentId=${paymentId}`
-            );
-            if (stopped || !r.ok || !r.data) return;
-            if (r.data.status === 'succeeded') {
-                clearInterval(timer);
-                setCheckoutState('succeeded');
-                await refreshMe();
-                showToast('ชำระเงินสำเร็จ! เปิดสิทธิ์ VIP เรียบร้อยแล้ว');
-            } else if (r.data.status === 'failed') {
-                clearInterval(timer);
-                setCheckoutState('failed');
-            }
-        }, 3000);
-        return () => {
-            stopped = true;
-            clearInterval(timer);
-        };
-    }, [paymentId, refreshMe, showToast]);
-
-    const closeCheckout = () => setCheckout(null);
-
-    // ==================== Checkout ====================
-    const startCheckout = async (planId: string) => {
-        setCreatingCheckout(true);
-        const r = await api<Checkout>('/api/subscriptions', {
-            method: 'POST',
-            body: JSON.stringify({ planId }),
-        });
-        setCreatingCheckout(false);
-        if (!r.ok || !r.data) {
-            showToast('สร้างรายการชำระเงินไม่สำเร็จ');
-            return;
-        }
-        setCheckout(r.data);
-        setCheckoutState('waiting');
-    };
-
     // ==================== Admin Actions ====================
     const loadSummary = useCallback(async () => {
         const r = await api<AdminSummary>('/api/admin/summary');
@@ -780,6 +667,7 @@ export default function Home() {
         setShowSponsorManager(false);
         setShowPayoutManager(false);
         setShowReviewRequests(false);
+        setShowModeration(false);
         showToast('ออกจากระบบแล้ว');
     };
 
@@ -1003,7 +891,7 @@ export default function Home() {
     // ==================== Rating ====================
     const openRating = (review: Review) => {
         if (tier === 'free') {
-            showToast('ให้คะแนนได้เฉพาะสมาชิก — สมัครสมาชิกเพื่อร่วมสร้างรายได้');
+            showToast('ให้คะแนนได้เฉพาะสมาชิก — สมัครสมาชิกเริ่มต้นเพียง 99 บาท (จ่ายครั้งเดียว)');
             setShowVipModal(true);
             return;
         }
@@ -1090,7 +978,7 @@ export default function Home() {
         }
         showToast('สร้างโปรโมชัน/คูปองแล้ว');
         setPromoFor(null);
-        setPromoForm({ title: '', description: '', couponCode: '', discountText: '', days: '7' });
+        setPromoForm({ title: '', description: '', couponCode: '', discountText: '', days: '7', kind: 'discount', quota: '10' });
         await refreshReviews();
     };
 
@@ -1106,6 +994,32 @@ export default function Home() {
             showToast(`คัดลอกโค้ด ${code} แล้ว`);
         } catch {
             showToast(code);
+        }
+    };
+
+    // ==================== คูปองกินฟรี ====================
+    const claimFreeMeal = async (p: Promotion) => {
+        const r = await api<{ error?: string; code?: string }>(
+            `/api/promotions/${p.id}/claim`,
+            { method: 'POST' }
+        );
+        if (!r.ok || !r.data?.code) {
+            showToast(r.data?.error ?? 'รับคูปองไม่สำเร็จ');
+            return;
+        }
+        showToast(`รับคูปองกินฟรีแล้ว! โค้ด ${r.data.code} — แสดงโค้ดนี้ที่ร้าน`);
+        await refreshReviews();
+    };
+
+    // ==================== Admin: Exclusive ====================
+    const toggleExclusive = async (review: Review) => {
+        const r = await api(`/api/admin/reviews/${review.id}/exclusive`, {
+            method: 'PATCH',
+            body: JSON.stringify({ exclusive: !review.is_exclusive }),
+        });
+        if (r.ok) {
+            showToast(review.is_exclusive ? 'ยกเลิก Exclusive แล้ว' : 'ตั้งเป็นรีวิว Exclusive แล้ว');
+            await refreshReviews();
         }
     };
 
@@ -1211,7 +1125,9 @@ export default function Home() {
                 try {
                     newItems.push(await uploadMedia(file));
                 } catch (err) {
-                    showToast(err instanceof Error ? err.message : 'อัพโหลดไม่สำเร็จ');
+                    const msg = err instanceof Error ? err.message : 'อัพโหลดไม่สำเร็จ';
+                    showToast(msg);
+                    if (msg.startsWith('⚠️')) window.alert(msg);
                 }
             }
 
@@ -1248,7 +1164,9 @@ export default function Home() {
                 try {
                     newItems.push(await uploadMedia(file));
                 } catch (err) {
-                    showToast(err instanceof Error ? err.message : 'อัพโหลดไม่สำเร็จ');
+                    const msg = err instanceof Error ? err.message : 'อัพโหลดไม่สำเร็จ';
+                    showToast(msg);
+                    if (msg.startsWith('⚠️')) window.alert(msg);
                 }
             }
 
@@ -1294,7 +1212,9 @@ export default function Home() {
         });
 
         if (!r.ok) {
-            showToast('บันทึกรีวิวไม่สำเร็จ');
+            const err = (r.data as { error?: string } | null)?.error;
+            showToast(err ?? 'บันทึกรีวิวไม่สำเร็จ');
+            if (err && err.startsWith('⚠️')) window.alert(err);
             return;
         }
 
@@ -1470,7 +1390,7 @@ export default function Home() {
                         </span>
                     </div>
                     <p className="text-sm text-slate-400 mt-1">
-                        คอมมูนิตี้รีวิวร้านอร่อย ปลอดหน้าม้า • รายได้แบ่งตามยอดวิว
+                        คอมมูนิตี้รีวิวร้านอร่อย ปลอดหน้าม้า • เฉพาะเรื่องอาหารและของกิน
                     </p>
                 </div>
 
@@ -1478,23 +1398,30 @@ export default function Home() {
                 <div className={`${isInApp ? 'hidden' : 'hidden md:flex'} flex-wrap items-center gap-2.5 justify-end`}>
                     {membership.isVip ? (
                         <span className="inline-block text-xs font-black px-3 py-1 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 shadow">
-                            สมาชิก VIP • ไม่มีโฆษณา • ถึง{' '}
-                            {fmtDate(membership.periodEnd)}
+                            {membership.tierName} • ไม่มีโฆษณา
                         </span>
                     ) : (
                         <span className="inline-block text-xs font-bold px-3 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                            ผู้ใช้ฟรี (เห็นสปอนเซอร์)
+                            ผู้ใช้ทั่วไป (เห็นโฆษณา)
                         </span>
                     )}
-                    <button
-                        onClick={() => setShowVipModal(true)}
-                        disabled={!ready}
-                        className="bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-500 hover:to-yellow-600 disabled:opacity-50 text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl shadow-lg transition cursor-pointer"
-                    >
-                        {membership.isVip
-                            ? 'ต่ออายุ / เปลี่ยนแพ็กเกจ'
-                            : 'สมัคร VIP'}
-                    </button>
+                    {(membership.isStore || storeStatus) && (
+                        <button
+                            onClick={() => setShowStoreDashboard(true)}
+                            className="bg-slate-800 hover:bg-slate-700 border border-amber-500/40 text-amber-300 font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer"
+                        >
+                            🏪 ร้านค้าของฉัน
+                        </button>
+                    )}
+                    {membership.tier !== 'store_vip' && (
+                        <button
+                            onClick={() => setShowVipModal(true)}
+                            disabled={!ready}
+                            className="bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-500 hover:to-yellow-600 disabled:opacity-50 text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl shadow-lg transition cursor-pointer"
+                        >
+                            {membership.isVip ? 'อัปเกรดสมาชิก' : 'สมัครสมาชิก'}
+                        </button>
+                    )}
                     {!isAdmin ? (
                         <button
                             onClick={() => setShowLogin(true)}
@@ -1551,12 +1478,11 @@ export default function Home() {
                         <div className="py-2">
                             {membership.isVip ? (
                                 <span className="block text-xs font-black px-3 py-2 rounded-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 text-center">
-                                    สมาชิก VIP • ถึง{' '}
-                                    {fmtDate(membership.periodEnd)}
+                                    {membership.tierName}
                                 </span>
                             ) : (
                                 <span className="block text-xs font-bold px-3 py-2 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-center">
-                                    ผู้ใช้ฟรี (เห็นสปอนเซอร์)
+                                    ผู้ใช้ทั่วไป (เห็นโฆษณา)
                                 </span>
                             )}
                         </div>
@@ -1568,8 +1494,20 @@ export default function Home() {
                             }}
                             className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-bold py-3 rounded-xl text-sm cursor-pointer"
                         >
-                            {membership.isVip ? 'ต่ออายุ VIP' : '⭐ สมัคร VIP'}
+                            {membership.isVip ? '⭐ อัปเกรดสมาชิก' : '⭐ สมัครสมาชิก'}
                         </button>
+
+                        {(membership.isStore || storeStatus) && (
+                            <button
+                                onClick={() => {
+                                    setShowStoreDashboard(true);
+                                    setMobileMenuOpen(false);
+                                }}
+                                className="w-full bg-slate-800 border border-amber-500/40 text-amber-300 font-bold py-3 rounded-xl text-sm cursor-pointer"
+                            >
+                                🏪 ร้านค้าของฉัน
+                            </button>
+                        )}
 
                         <button
                             onClick={() => {
@@ -1600,8 +1538,15 @@ export default function Home() {
                 </div>
             )}
 
-            {/* My Earnings */}
-            {membership.isVip &&
+            {profile?.blocked && (
+                <div className="bg-rose-950/60 border border-rose-500/50 text-rose-200 text-xs rounded-2xl p-4">
+                    บัญชีนี้ถูกระงับการใช้งานโดยแอดมิน
+                    {profile.blockedReason ? ` (${profile.blockedReason})` : ''} — ไม่สามารถโพสต์ ให้คะแนน หรือสมัครสมาชิกได้
+                </div>
+            )}
+
+            {/* My Earnings (ปิดไว้: ไม่มีการสร้างรายได้ให้ผู้ใช้ทั่วไป) */}
+            {PAYOUTS_ENABLED && membership.isVip &&
                 (payoutTotals.paid > 0 || payoutTotals.pending > 0) && (
                     <section className="bg-gradient-to-r from-emerald-950/60 to-slate-900 border border-emerald-500/40 rounded-2xl p-4">
                         <h2 className="text-xs font-black uppercase text-emerald-400 mb-2">
@@ -1656,13 +1601,21 @@ export default function Home() {
                             >
                                 {showSponsorManager ? 'ปิด' : 'จัดการสปอนเซอร์'}
                             </button>
+                            {PAYOUTS_ENABLED && (
+                                <button
+                                    onClick={() =>
+                                        setShowPayoutManager(!showPayoutManager)
+                                    }
+                                    className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
+                                >
+                                    {showPayoutManager ? 'ปิด' : 'จ่ายรางวัล'}
+                                </button>
+                            )}
                             <button
-                                onClick={() =>
-                                    setShowPayoutManager(!showPayoutManager)
-                                }
-                                className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
+                                onClick={() => setShowModeration(!showModeration)}
+                                className="bg-violet-500 hover:bg-violet-600 text-white font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
                             >
-                                {showPayoutManager ? 'ปิด' : 'จ่ายรางวัล'}
+                                {showModeration ? 'ปิด' : '🛡️ ร้านค้า/รายงาน/บล็อก'}
                             </button>
                             <button
                                 onClick={() => setShowLogs(!showLogs)}
@@ -1737,6 +1690,16 @@ export default function Home() {
                         </p>
                     )}
                 </section>
+            )}
+
+            {isAdmin && showModeration && (
+                <AdminModeration
+                    showToast={showToast}
+                    onContentChanged={() => {
+                        refreshReviews();
+                        setMarketKey((k) => k + 1);
+                    }}
+                />
             )}
 
             {/* Sponsor Manager */}
@@ -1995,7 +1958,7 @@ export default function Home() {
             )}
 
             {/* Payout Manager */}
-            {isAdmin && showPayoutManager && summary && (
+            {PAYOUTS_ENABLED && isAdmin && showPayoutManager && summary && (
                 <section className="hidden md:block bg-slate-900 border-2 border-emerald-500/40 rounded-2xl p-5 space-y-4 shadow-2xl">
                     <div className="flex justify-between items-center border-b border-slate-800 pb-3">
                         <h2 className="text-sm font-bold text-white">
@@ -2488,7 +2451,10 @@ export default function Home() {
                         เขียนรีวิวร้านอาหารใหม่
                     </h2>
                     <p className="text-[11px] text-amber-300">
-                        อัปโหลดได้สูงสุด {MAX_MEDIA_ITEMS} ไฟล์ (รูปภาพ + วิดีโอ)
+                        อัปโหลดได้สูงสุด {MAX_MEDIA_ITEMS} ไฟล์ (รูปภาพ + วิดีโอไม่เกิน 60 วินาที)
+                    </p>
+                    <p className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">
+                        {POST_RULE}
                     </p>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <input
@@ -2651,6 +2617,13 @@ export default function Home() {
                 </form>
             )}
 
+            <MarketSection
+                refreshKey={marketKey}
+                isAdmin={isAdmin}
+                showToast={showToast}
+                onReport={(t) => setReportTarget(t)}
+            />
+
             {/* Reviews Grid */}
             <main className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {reviewsLoading && reviews.length === 0 && (
@@ -2702,6 +2675,11 @@ export default function Home() {
                                 </div>
 
                                 <div className="absolute top-3 left-3 flex flex-wrap gap-1.5">
+                                    {res.is_exclusive && (
+                                        <span className="text-[11px] font-black px-2.5 py-1 rounded-full backdrop-blur-md bg-violet-600/90 text-white border border-violet-300">
+                                            💎 Exclusive
+                                        </span>
+                                    )}
                                     {res.boosted && (
                                         <span className="text-[11px] font-black px-2.5 py-1 rounded-full backdrop-blur-md bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border border-amber-300 shadow">
                                             🔥 แนะนำพิเศษ (บูสต์)
@@ -2789,8 +2767,8 @@ export default function Home() {
                                             <div key={p.id} className="flex items-center justify-between gap-2">
                                                 <div className="min-w-0">
                                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                                        <span className="text-[10px] font-black bg-amber-500 text-slate-950 px-2 py-0.5 rounded-full uppercase">
-                                                            โปรโมชัน
+                                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full uppercase ${p.kind === 'free_meal' ? 'bg-emerald-500 text-slate-950' : 'bg-amber-500 text-slate-950'}`}>
+                                                            {p.kind === 'free_meal' ? 'กินฟรี' : 'โปรโมชัน'}
                                                         </span>
                                                         <span className="text-xs font-bold text-amber-300 truncate">
                                                             {p.title}
@@ -2802,6 +2780,35 @@ export default function Home() {
                                                         </p>
                                                     )}
                                                 </div>
+                                                {p.kind === 'free_meal' && (
+                                                    p.my_code ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                copyCoupon(p.my_code!);
+                                                            }}
+                                                            className="shrink-0 bg-emerald-900/60 border border-emerald-500/50 text-emerald-300 font-mono font-bold text-[11px] px-2.5 py-1.5 rounded-lg cursor-pointer"
+                                                            title="โค้ดกินฟรีของคุณ — แสดงที่ร้าน"
+                                                        >
+                                                            🎟️ {p.my_code}
+                                                        </button>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            disabled={p.quota != null && (p.claimed_count ?? 0) >= p.quota}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                claimFreeMeal(p);
+                                                            }}
+                                                            className="shrink-0 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-[11px] px-2.5 py-1.5 rounded-lg cursor-pointer"
+                                                        >
+                                                            {p.quota != null && (p.claimed_count ?? 0) >= p.quota
+                                                                ? 'หมดแล้ว'
+                                                                : `รับคูปอง (${Math.max((p.quota ?? 0) - (p.claimed_count ?? 0), 0)} สิทธิ์)`}
+                                                        </button>
+                                                    )
+                                                )}
                                                 {p.coupon_code && (
                                                     <button
                                                         type="button"
@@ -2822,7 +2829,7 @@ export default function Home() {
                                 )}
 
                                 {/* Owner High-Tier Tools (Boost & Promo) */}
-                                {tier === 'premium' && res.is_mine && (
+                                {canStoreTools && res.is_mine && (
                                     <div className="flex gap-1.5 pt-1">
                                         <button
                                             type="button"
@@ -2912,6 +2919,30 @@ export default function Home() {
                                             แผนที่
                                         </a>
                                     )}
+                                    {!res.is_mine && !res.exclusive_locked && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setReportTarget({ type: 'review', id: res.id, title: res.name });
+                                            }}
+                                            className="text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 px-2.5 py-2 rounded-lg cursor-pointer transition"
+                                            title="แจ้งเนื้อหาไม่เหมาะสม/ผิดกฎหมาย"
+                                        >
+                                            🚩 แจ้ง
+                                        </button>
+                                    )}
+                                    {isAdmin && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                toggleExclusive(res);
+                                            }}
+                                            className="text-[11px] bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 border border-violet-500/40 px-2.5 py-2 rounded-lg cursor-pointer transition"
+                                            title="สลับรีวิว Exclusive (เห็นเต็มเฉพาะสมาชิกระดับร้านค้า)"
+                                        >
+                                            {res.is_exclusive ? 'ยกเลิก 💎' : '💎'}
+                                        </button>
+                                    )}
                                     {isAdmin && (
                                         <button
                                             onClick={(e) => {
@@ -2933,6 +2964,22 @@ export default function Home() {
                     );
                 })}
             </main>
+
+            {reviewsMeta.limited && reviewsMeta.total > reviews.length && (
+                <div className="bg-gradient-to-r from-amber-950/50 to-slate-900 border border-amber-500/40 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <p className="text-xs text-amber-200">
+                        ผู้ใช้ทั่วไปอ่านได้ {reviewsMeta.freeLimit} รีวิวล่าสุด — ยังมีอีก{' '}
+                        {(reviewsMeta.total - reviews.length).toLocaleString()} รีวิว
+                        สมัครสมาชิกเพื่ออ่านรีวิวไม่จำกัดและปิดโฆษณา
+                    </p>
+                    <button
+                        onClick={() => setShowVipModal(true)}
+                        className="shrink-0 bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl cursor-pointer"
+                    >
+                        สมัครสมาชิก 99 บาท
+                    </button>
+                </div>
+            )}
 
             {/* Admin Login Modal */}
             {showLogin && (
@@ -3370,150 +3417,37 @@ export default function Home() {
                 </div>
             )}
 
-            {/* VIP Modal */}
-            {showVipModal && (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                    <div className="bg-slate-900 border-2 border-amber-500/50 rounded-2xl max-w-2xl w-full p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
-                        <div className="flex justify-between items-center border-b border-slate-800 pb-3">
-                            <div>
-                                <h3 className="text-lg font-bold text-white">
-                                    สมัครสมาชิก VIP
-                                </h3>
-                                <p className="text-xs text-slate-400 mt-0.5">
-                                    ชำระผ่าน PromptPay QR • ปิดสปอนเซอร์ทั้งหมด
-                                </p>
-                            </div>
-                            <button
-                                onClick={() => setShowVipModal(false)}
-                                className="text-slate-400 hover:text-white cursor-pointer text-lg"
-                            >
-                                X
-                            </button>
-                        </div>
-                        {plans.length === 0 ? (
-                            <p className="text-xs text-slate-400">
-                                กำลังโหลดแพ็กเกจ...
-                            </p>
-                        ) : (
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {plans.map((p, i) => (
-                                    <div
-                                        key={p.id}
-                                        className={`rounded-2xl p-5 flex flex-col justify-between space-y-4 ${
-                                            i === plans.length - 1 &&
-                                            plans.length > 1
-                                                ? 'bg-gradient-to-b from-amber-950/40 to-slate-950 border-2 border-amber-500'
-                                                : 'bg-slate-950 border border-slate-800'
-                                        }`}
-                                    >
-                                        <div className="space-y-2">
-                                            <span className="text-[11px] font-black uppercase px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950">
-                                                {p.name}
-                                            </span>
-                                            <div className="text-2xl font-black text-white">
-                                                {baht(p.price_satang)}
-                                                <span className="text-xs font-normal text-slate-400">
-                                                    /{p.interval_days} วัน
-                                                </span>
-                                            </div>
-                                            <ul className="text-xs text-slate-300 space-y-2 pt-2">
-                                                {p.perks.map((perk) => (
-                                                    <li key={perk}>✓ {perk}</li>
-                                                ))}
-                                            </ul>
-                                        </div>
-                                        <button
-                                            onClick={() => startCheckout(p.id)}
-                                            disabled={creatingCheckout}
-                                            className="w-full bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-500 hover:to-yellow-600 disabled:opacity-50 text-slate-950 font-black py-2.5 rounded-xl text-xs shadow-lg transition cursor-pointer"
-                                        >
-                                            {creatingCheckout
-                                                ? 'กำลังสร้าง QR...'
-                                                : `สมัคร ${p.name}`}
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            )}
+            {/* Membership Modal (สมัครสมาชิก / ชำระเงิน PromptPay + ตรวจสลิป) */}
+            <MembershipModal
+                open={showVipModal}
+                onClose={() => setShowVipModal(false)}
+                tiers={tiers}
+                membership={membership}
+                profile={profile}
+                store={storeStatus}
+                onChanged={refreshMe}
+                showToast={showToast}
+            />
 
-            {/* Checkout Modal */}
-            {checkout && (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                    <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-2xl text-center">
-                        <div className="flex justify-between items-center">
-                            <h3 className="text-base font-bold text-white">
-                                ชำระเงิน VIP {baht(checkout.amountSatang)}
-                            </h3>
-                            <button
-                                onClick={closeCheckout}
-                                className="text-slate-400 hover:text-white cursor-pointer"
-                            >
-                                X
-                            </button>
-                        </div>
-                        {checkoutState === 'waiting' && (
-                            <>
-                                {checkout.qrImageUrl ? (
-                                    <img
-                                        src={checkout.qrImageUrl}
-                                        alt="PromptPay QR"
-                                        className="mx-auto w-56 h-56 bg-white rounded-xl p-2"
-                                    />
-                                ) : (
-                                    <p className="text-xs text-rose-300">
-                                        ไม่พบ QR กรุณาปิดแล้วลองใหม่
-                                    </p>
-                                )}
-                                <p className="text-xs text-slate-300">
-                                    สแกนด้วยแอปธนาคารเพื่อชำระเงิน
-                                </p>
-                                {checkout.expiresAt && (
-                                    <p className="text-[11px] text-slate-500">
-                                        QR หมดอายุ{' '}
-                                        {fmtDateTime(checkout.expiresAt)}
-                                    </p>
-                                )}
-                                <p className="text-[11px] text-amber-300 animate-pulse">
-                                    กำลังรอการชำระเงิน...
-                                </p>
-                            </>
-                        )}
-                        {checkoutState === 'succeeded' && (
-                            <>
-                                <p className="text-3xl">✅</p>
-                                <p className="text-sm font-bold text-emerald-300">
-                                    ชำระเงินสำเร็จ เปิดสิทธิ์ VIP แล้ว
-                                </p>
-                                <button
-                                    onClick={closeCheckout}
-                                    className="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer"
-                                >
-                                    ปิด
-                                </button>
-                            </>
-                        )}
-                        {checkoutState === 'failed' && (
-                            <>
-                                <p className="text-sm font-bold text-rose-300">
-                                    การชำระเงินไม่สำเร็จ
-                                </p>
-                                <button
-                                    onClick={() => {
-                                        closeCheckout();
-                                        setShowVipModal(true);
-                                    }}
-                                    className="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer"
-                                >
-                                    ลองใหม่
-                                </button>
-                            </>
-                        )}
-                    </div>
-                </div>
-            )}
+            <StoreDashboard
+                open={showStoreDashboard}
+                onClose={() => setShowStoreDashboard(false)}
+                showToast={showToast}
+                onChanged={() => {
+                    refreshMe();
+                    setMarketKey((k) => k + 1);
+                }}
+                onUpgrade={() => {
+                    setShowStoreDashboard(false);
+                    setShowVipModal(true);
+                }}
+            />
+
+            <ReportModal
+                target={reportTarget}
+                onClose={() => setReportTarget(null)}
+                showToast={showToast}
+            />
 
             {/* Rating Modal */}
             {ratingFor && (
@@ -3746,7 +3680,7 @@ export default function Home() {
                         <div className="flex justify-between items-start">
                             <div>
                                 <span className="text-[10px] font-black uppercase tracking-wider bg-amber-500 text-slate-950 px-2.5 py-0.5 rounded-full">
-                                    สมาชิกระดับสูง (Premium)
+                                    สมาชิกระดับร้านค้า
                                 </span>
                                 <h3 className="text-base font-bold text-white mt-1">
                                     สร้างโปรโมชัน & คูปองส่วนลด
@@ -3765,6 +3699,41 @@ export default function Home() {
                         </div>
 
                         <div className="space-y-3">
+                            <div className="grid grid-cols-2 gap-2">
+                                {([
+                                    ['discount', '🏷️ คูปองส่วนลด'],
+                                    ['free_meal', '🎟️ คูปองกินฟรีรายเดือน'],
+                                ] as const).map(([k, label]) => (
+                                    <button
+                                        key={k}
+                                        type="button"
+                                        onClick={() => setPromoForm({ ...promoForm, kind: k })}
+                                        className={`text-[11px] font-bold py-2 rounded-xl border cursor-pointer ${
+                                            promoForm.kind === k
+                                                ? 'bg-amber-500 text-slate-950 border-amber-400'
+                                                : 'bg-slate-800 text-slate-300 border-slate-700'
+                                        }`}
+                                    >
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                            {promoForm.kind === 'free_meal' && (
+                                <div>
+                                    <label className="text-xs font-bold text-slate-300 block mb-1">
+                                        จำนวนสิทธิ์กินฟรี (สร้างได้เดือนละ 1 แคมเปญ)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={200}
+                                        value={promoForm.quota}
+                                        onChange={(e) => setPromoForm({ ...promoForm, quota: e.target.value })}
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                                    />
+                                    <p className="text-[10px] text-slate-500 mt-1">ผู้ใช้กดรับได้คนละ 1 โค้ด แล้วนำโค้ดมาแสดงที่ร้าน</p>
+                                </div>
+                            )}
                             <div>
                                 <label className="text-xs font-bold text-slate-300 block mb-1">
                                     หัวข้อโปรโมชัน *

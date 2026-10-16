@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
     title: 'กินจริง (KinJing) - รีวิวร้านอาหาร',
-    description: 'คอมมูนิตี้รีวิวร้านอร่อย ปลอดหน้าม้า • รายได้แบ่งตามยอดวิว',
+    description: 'คอมมูนิตี้รีวิวร้านอร่อย ปลอดหน้าม้า • เฉพาะเรื่องอาหารและของกิน',
     openGraph: {
         title: 'กินจริง (KinJing)',
         description: 'คอมมูนิตี้รีวิวร้านอร่อย ปลอดหน้าม้า',
