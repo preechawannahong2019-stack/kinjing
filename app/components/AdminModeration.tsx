@@ -37,9 +37,29 @@ interface AdminUser {
     phone: string | null;
     blocked_at: string | null;
     blocked_reason: string | null;
-    membership_tier: string | null;
+    membership_tier: string;
     activated_at: string | null;
+    last_login_at: string | null;
+    has_password: boolean;
+    review_count: number;
+    paid_satang: number;
+    store_name: string | null;
+    store_status: string | null;
 }
+interface UserCounts {
+    member: number;
+    store: number;
+    store_vip: number;
+    blocked: number;
+    pending_orders: number;
+    review_orders: number;
+}
+const TIER_LABEL: Record<string, string> = {
+    free: 'ทั่วไป',
+    member: 'ระดับต้น 99',
+    store: 'ร้านค้า 299',
+    store_vip: 'ร้านค้า VIP 599',
+};
 interface AdminOrder {
     id: string;
     user_id: string;
@@ -51,6 +71,9 @@ interface AdminOrder {
     verify_attempts: number;
     created_at: string;
     phone: string | null;
+    display_name: string | null;
+    slip_url: string | null;
+    fail_reason: string | null;
 }
 
 const fmt = (s: string | null) => (s ? new Date(s).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }) : '-');
@@ -64,7 +87,8 @@ export default function AdminModeration({
     showToast: (m: string) => void;
     onContentChanged: () => void;
 }) {
-    const [tab, setTab] = useState<Tab>('stores');
+    const [tab, setTab] = useState<Tab>('users');
+    const [counts, setCounts] = useState<UserCounts | null>(null);
     const [stores, setStores] = useState<AdminStore[]>([]);
     const [reports, setReports] = useState<AdminReport[]>([]);
     const [users, setUsers] = useState<AdminUser[]>([]);
@@ -80,8 +104,13 @@ export default function AdminModeration({
             const r = await api<{ reports: AdminReport[] }>(`/api/admin/reports?status=${filter === 'pending' ? 'open' : filter}`);
             if (r.data) setReports(r.data.reports);
         } else if (tab === 'users') {
-            const r = await api<{ users: AdminUser[] }>(`/api/admin/users?q=${encodeURIComponent(q)}`);
-            if (r.data) setUsers(r.data.users);
+            const r = await api<{ users: AdminUser[]; counts: UserCounts }>(
+                `/api/admin/users?q=${encodeURIComponent(q)}&tier=${filter === 'pending' ? 'all' : filter}`
+            );
+            if (r.data) {
+                setUsers(r.data.users);
+                setCounts(r.data.counts);
+            }
         } else {
             const r = await api<{ orders: AdminOrder[] }>(`/api/admin/membership_orders?status=${filter}`);
             if (r.data) setOrders(r.data.orders);
@@ -120,20 +149,20 @@ export default function AdminModeration({
     const filters: Record<Tab, string[]> = {
         stores: ['pending', 'approved', 'rejected', 'all'],
         reports: ['pending', 'resolved', 'dismissed', 'all'],
-        users: [],
-        orders: ['pending', 'succeeded', 'expired', 'all'],
+        users: ['pending', 'member', 'store', 'store_vip', 'free', 'blocked'],
+        orders: ['pending', 'succeeded', 'rejected', 'expired', 'all'],
     };
 
     return (
         <section className="bg-slate-900 border-2 border-violet-500/40 rounded-2xl p-4 space-y-3">
             <div className="flex flex-wrap gap-2 items-center justify-between">
-                <h2 className="text-xs font-black uppercase text-violet-300">🛡️ ตรวจสอบ & ความปลอดภัย</h2>
+                <h2 className="text-xs font-black uppercase text-violet-300">👥 จัดการสมาชิก • ชำระเงิน • ร้านค้า • รายงาน</h2>
                 <div className="flex flex-wrap gap-1.5">
                     {([
-                        ['stores', 'ยืนยันร้านค้า'],
-                        ['reports', 'รายงานการละเมิด'],
-                        ['users', 'สมาชิก/บล็อก'],
-                        ['orders', 'รายการชำระเงิน'],
+                        ['users', '👥 สมาชิก'],
+                        ['orders', `💳 รายการชำระเงิน${counts?.pending_orders ? ` (${counts.pending_orders})` : ''}`],
+                        ['stores', '🏪 ยืนยันร้านค้า'],
+                        ['reports', '🚩 รายงานการละเมิด'],
                     ] as [Tab, string][]).map(([k, label]) => (
                         <button
                             key={k}
@@ -152,11 +181,21 @@ export default function AdminModeration({
             <div className="flex flex-wrap gap-1.5 items-center">
                 {filters[tab].map((f) => (
                     <button key={f} onClick={() => setFilter(f)} className={`${btn} ${filter === f ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
-                        {f === 'pending' ? (tab === 'reports' ? 'open' : 'pending') : f}
+                        {tab === 'users'
+                            ? f === 'pending'
+                                ? 'ทั้งหมด'
+                                : f === 'blocked'
+                                ? 'ถูกบล็อก'
+                                : TIER_LABEL[f]
+                            : tab === 'orders' && f === 'pending'
+                            ? 'รอตรวจ'
+                            : f === 'pending' && tab === 'reports'
+                            ? 'open'
+                            : f}
                     </button>
                 ))}
                 {tab === 'users' && (
-                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาด้วยเบอร์โทร (เว้นว่าง = สมาชิก/ผู้ถูกบล็อก)" className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white w-72" />
+                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาด้วยเบอร์โทร" className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white w-full sm:w-56" />
                 )}
                 <button onClick={load} className={`${btn} bg-slate-800 text-slate-300`}>รีเฟรช</button>
             </div>
@@ -224,20 +263,69 @@ export default function AdminModeration({
 
             {tab === 'users' && (
                 <div className="space-y-2">
-                    {users.length === 0 && <p className="text-xs text-slate-500">ไม่พบผู้ใช้</p>}
+                    {counts && (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            {[
+                                ['ระดับต้น', counts.member],
+                                ['ร้านค้า', counts.store],
+                                ['ร้านค้า VIP', counts.store_vip],
+                                ['ถูกบล็อก', counts.blocked],
+                            ].map(([label, n]) => (
+                                <div key={label as string} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2">
+                                    <span className="text-[10px] text-slate-400 block">{label}</span>
+                                    <span className="text-lg font-black text-white">{n}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {users.length === 0 && <p className="text-xs text-slate-500">ไม่พบสมาชิก</p>}
                     {users.map((u) => (
-                        <div key={u.id} className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-2">
-                            <div className="text-[11px] text-slate-300 min-w-0">
-                                <p className="text-xs font-bold text-white">{u.display_name ?? '@Anonymous'} • {u.phone ?? 'ไม่มีเบอร์'}</p>
-                                <p>สมาชิก: {u.membership_tier ?? '-'} {u.activated_at ? `(ตั้งแต่ ${fmt(u.activated_at)})` : ''}</p>
+                        <div key={u.id} className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                            <div className="text-[11px] text-slate-300 min-w-0 space-y-0.5">
+                                <p className="text-xs font-bold text-white">
+                                    {u.display_name ?? '@Anonymous'} • {u.phone ?? 'ไม่มีเบอร์'}{' '}
+                                    <span className="ml-1 px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px]">{TIER_LABEL[u.membership_tier] ?? u.membership_tier}</span>
+                                </p>
+                                <p>
+                                    สมัคร {fmt(u.activated_at)} • ชำระแล้ว {baht(u.paid_satang)} • รีวิว {u.review_count} • {u.has_password ? 'ตั้งรหัสผ่านแล้ว' : 'ยังไม่ตั้งรหัสผ่าน'} • เข้าระบบล่าสุด {fmt(u.last_login_at)}
+                                </p>
+                                {u.store_name && <p>ร้าน: {u.store_name} ({u.store_status})</p>}
                                 {u.blocked_at && <p className="text-rose-300">ถูกบล็อก {fmt(u.blocked_at)} — {u.blocked_reason}</p>}
-                                <p className="text-slate-600 font-mono text-[10px]">{u.id}</p>
                             </div>
-                            {u.blocked_at ? (
-                                <button onClick={() => act(`/api/admin/users/${u.id}/unblock`, 'POST', undefined, 'ปลดบล็อกแล้ว')} className={`${btn} bg-emerald-700 text-white`}>ปลดบล็อก</button>
-                            ) : (
-                                <button onClick={() => blockUser(u.id)} className={`${btn} bg-rose-600 text-white`}>บล็อก</button>
-                            )}
+                            <div className="flex flex-wrap gap-1.5 shrink-0 items-center">
+                                <select
+                                    value={u.membership_tier}
+                                    onChange={(e) => {
+                                        const t = e.target.value;
+                                        if (window.confirm(`เปลี่ยนระดับของ ${u.phone ?? u.id} เป็น "${TIER_LABEL[t]}"?`))
+                                            act(`/api/admin/users/${u.id}/tier`, 'POST', { tier: t }, 'เปลี่ยนระดับสมาชิกแล้ว');
+                                    }}
+                                    className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
+                                >
+                                    {Object.entries(TIER_LABEL).map(([k, v]) => (
+                                        <option key={k} value={k}>{v}</option>
+                                    ))}
+                                </select>
+                                {u.phone && (
+                                    <button
+                                        onClick={async () => {
+                                            if (!window.confirm('รีเซ็ตรหัสผ่านของสมาชิกนี้?')) return;
+                                            const r = await api<{ tempPassword?: string; error?: string }>(`/api/admin/users/${u.id}/reset_password`, { method: 'POST' });
+                                            if (r.ok && r.data?.tempPassword) window.alert(`รหัสผ่านชั่วคราว: ${r.data.tempPassword}\nแจ้งสมาชิกให้เข้าสู่ระบบแล้วเปลี่ยนรหัสผ่านที่ "บัญชีของฉัน"`);
+                                            else showToast(r.data?.error ?? 'รีเซ็ตไม่สำเร็จ');
+                                            load();
+                                        }}
+                                        className={`${btn} bg-sky-700 text-white`}
+                                    >
+                                        รีเซ็ตรหัสผ่าน
+                                    </button>
+                                )}
+                                {u.blocked_at ? (
+                                    <button onClick={() => act(`/api/admin/users/${u.id}/unblock`, 'POST', undefined, 'ปลดบล็อกแล้ว')} className={`${btn} bg-emerald-700 text-white`}>ปลดบล็อก</button>
+                                ) : (
+                                    <button onClick={() => blockUser(u.id)} className={`${btn} bg-rose-600 text-white`}>บล็อก</button>
+                                )}
+                            </div>
                         </div>
                     ))}
                 </div>
@@ -247,12 +335,31 @@ export default function AdminModeration({
                 <div className="space-y-2">
                     {orders.length === 0 && <p className="text-xs text-slate-500">ไม่มีรายการ</p>}
                     {orders.map((o) => (
-                        <div key={o.id} className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-2">
+                        <div key={o.id} className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                             <div className="text-[11px] text-slate-300 min-w-0">
                                 <p className="text-xs font-bold text-white">{o.tier} • {baht(o.amount_satang)} • {o.status}</p>
-                                <p>โทร {o.phone ?? '-'} • สร้าง {fmt(o.created_at)} • แนบสลิป {o.verify_attempts} ครั้ง</p>
+                                <p>{o.display_name ?? '@Anonymous'} • โทร {o.phone ?? '-'} • สร้าง {fmt(o.created_at)} • แนบสลิป {o.verify_attempts} ครั้ง</p>
                                 {o.slip_ref && <p>Ref: {o.slip_ref} {o.slip_sender ? `• ผู้โอน ${o.slip_sender}` : ''}</p>}
+                                {o.fail_reason && <p className="text-rose-300">{o.fail_reason}</p>}
+                                {o.status === 'review' && <p className="text-sky-300 font-bold">⏳ ผู้ใช้แนบสลิปแล้ว รอตรวจ — ตรวจยอดเข้าบัญชีก่อนอนุมัติ</p>}
+                                {o.slip_url && (
+                                    <a href={o.slip_url} target="_blank" rel="noopener noreferrer" className="inline-block mt-1">
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img src={o.slip_url} alt="สลิป" className="h-40 rounded-lg border border-slate-700" />
+                                    </a>
+                                )}
                             </div>
+                            {(o.status === 'review' || o.status === 'pending') && (
+                                <button
+                                    onClick={() => {
+                                        const note = window.prompt('เหตุผลที่ไม่อนุมัติ', 'ยอดเงิน/สลิปไม่ถูกต้อง');
+                                        if (note !== null) act(`/api/admin/membership_orders/${o.id}/reject`, 'POST', { note }, 'ปฏิเสธรายการแล้ว');
+                                    }}
+                                    className={`${btn} bg-rose-600 text-white shrink-0`}
+                                >
+                                    ไม่อนุมัติ
+                                </button>
+                            )}
                             {o.status !== 'succeeded' && (
                                 <button
                                     onClick={() => {

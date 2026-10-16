@@ -6,6 +6,7 @@ import {
     baht,
     compressImage,
     type Membership,
+    type PendingOrder,
     type StoreStatus,
     type TierInfo,
     type UserProfile,
@@ -22,7 +23,7 @@ interface Order {
     promptpayId: string | null;
 }
 
-type Step = 'choose' | 'details' | 'store' | 'pay' | 'done';
+type Step = 'choose' | 'details' | 'store' | 'pay' | 'done' | 'review';
 
 const RANK: Record<string, number> = { free: 0, member: 1, store: 2, store_vip: 3 };
 
@@ -39,6 +40,8 @@ export default function MembershipModal({
     store,
     onChanged,
     showToast,
+    pendingOrder,
+    onLogin,
 }: {
     open: boolean;
     onClose: () => void;
@@ -48,12 +51,17 @@ export default function MembershipModal({
     store: StoreStatus | null;
     onChanged: () => Promise<void> | void;
     showToast: (m: string) => void;
+    pendingOrder: PendingOrder | null;
+    onLogin: () => void;
 }) {
     const [step, setStep] = useState<Step>('choose');
     const [tier, setTier] = useState<TierInfo | null>(null);
     const [phone, setPhone] = useState('');
     const [displayName, setDisplayName] = useState('');
     const [accept, setAccept] = useState(false);
+    const [password, setPassword] = useState('');
+    const [password2, setPassword2] = useState('');
+    const [needLogin, setNeedLogin] = useState(false);
     const [order, setOrder] = useState<Order | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -65,6 +73,7 @@ export default function MembershipModal({
             setOrder(null);
             setError(null);
             setSlipPreview(null);
+            setNeedLogin(false);
             setAccept(!!profile?.termsAccepted);
         }
     }, [open, profile?.termsAccepted]);
@@ -81,8 +90,13 @@ export default function MembershipModal({
         e.preventDefault();
         if (!tier) return;
         setError(null);
+        setNeedLogin(false);
+        if (!profile?.hasPassword && password !== password2) {
+            setError('รหัสผ่านทั้งสองช่องไม่ตรงกัน');
+            return;
+        }
         setBusy(true);
-        const r = await api<Order & { error?: string; needStore?: boolean }>(
+        const r = await api<Order & { error?: string; needStore?: boolean; needLogin?: boolean }>(
             '/api/membership/checkout',
             {
                 method: 'POST',
@@ -90,6 +104,7 @@ export default function MembershipModal({
                     tier: tier.id,
                     phone,
                     displayName,
+                    password,
                     acceptTerms: accept,
                 }),
             }
@@ -98,6 +113,7 @@ export default function MembershipModal({
         if (!r.ok || !r.data) {
             setError(r.data?.error ?? 'สร้างรายการชำระเงินไม่สำเร็จ');
             if (r.data?.needStore) setStep('store');
+            if (r.data?.needLogin) setNeedLogin(true);
             return;
         }
         setOrder(r.data);
@@ -128,6 +144,11 @@ export default function MembershipModal({
             const data = await res.json().catch(() => null);
             if (!res.ok) {
                 setError(data?.error ?? 'ตรวจสลิปไม่ผ่าน');
+                return;
+            }
+            if (data?.status === 'review') {
+                setStep('review');
+                await onChanged();
                 return;
             }
             setStep('done');
@@ -161,6 +182,22 @@ export default function MembershipModal({
                     </p>
                 )}
 
+                {step === 'choose' && pendingOrder?.status === 'review' && (
+                    <p className="text-xs text-sky-200 bg-sky-500/10 border border-sky-500/30 rounded-lg p-3">
+                        ⏳ ได้รับสลิป {baht(pendingOrder.amount_satang)} แล้ว — รอแอดมินตรวจสอบและเปิดสิทธิ์ให้
+                    </p>
+                )}
+                {step === 'choose' && pendingOrder?.status === 'rejected' && (
+                    <p className="text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg p-3">
+                        สลิปล่าสุดไม่ผ่านการตรวจสอบ{pendingOrder.fail_reason ? `: ${pendingOrder.fail_reason}` : ''} — กรุณาสมัครใหม่หรือติดต่อแอดมิน
+                    </p>
+                )}
+                {step === 'choose' && !profile?.hasPassword && (
+                    <p className="text-xs text-slate-300">
+                        เป็นสมาชิกอยู่แล้ว?{' '}
+                        <button onClick={onLogin} className="text-amber-300 underline font-bold cursor-pointer">เข้าสู่ระบบสมาชิก</button>
+                    </p>
+                )}
                 {step === 'choose' && (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                         <div className="rounded-2xl p-4 bg-slate-950 border border-slate-800 space-y-2">
@@ -260,6 +297,19 @@ export default function MembershipModal({
                             <label className="text-xs font-bold text-slate-300 block mb-1">ชื่อที่แสดงในรีวิว (ไม่บังคับ)</label>
                             <input className={input} value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={50} placeholder={profile?.displayName ?? '@ชื่อของคุณ'} />
                         </div>
+                        {!profile?.hasPassword && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <div>
+                                    <label className="text-xs font-bold text-slate-300 block mb-1">ตั้งรหัสผ่าน * (อย่างน้อย 6 ตัว)</label>
+                                    <input className={input} type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} autoComplete="new-password" />
+                                </div>
+                                <div>
+                                    <label className="text-xs font-bold text-slate-300 block mb-1">ยืนยันรหัสผ่าน *</label>
+                                    <input className={input} type="password" value={password2} onChange={(e) => setPassword2(e.target.value)} required minLength={6} autoComplete="new-password" />
+                                </div>
+                                <p className="sm:col-span-2 text-[10px] text-slate-500">ใช้เบอร์โทร + รหัสผ่านนี้ “เข้าสู่ระบบสมาชิก” จากมือถือ/คอมเครื่องอื่น</p>
+                            </div>
+                        )}
                         <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-44 overflow-y-auto">
                             <p className="text-xs font-bold text-white mb-1.5">เงื่อนไขการใช้งาน</p>
                             <ol className="list-decimal pl-4 space-y-1 text-[11px] text-slate-300">
@@ -273,6 +323,11 @@ export default function MembershipModal({
                             ข้าพเจ้าได้อ่านและยอมรับเงื่อนไขการใช้งานทั้งหมด
                         </label>
                         {error && <p className="text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg p-2">{error}</p>}
+                        {needLogin && (
+                            <button type="button" onClick={onLogin} className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs py-2.5 rounded-xl cursor-pointer">
+                                🔑 เข้าสู่ระบบสมาชิก
+                            </button>
+                        )}
                         <div className="flex gap-2">
                             <button type="button" onClick={() => setStep('choose')} className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs py-2.5 rounded-xl cursor-pointer">
                                 ย้อนกลับ
@@ -312,6 +367,15 @@ export default function MembershipModal({
                         )}
                         {error && <p className="text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg p-2">{error}</p>}
                         <p className="text-[10px] text-slate-500">รูปสลิปใช้ตรวจสอบเท่านั้น ระบบไม่เก็บรูปไว้</p>
+                    </div>
+                )}
+
+                {step === 'review' && order && (
+                    <div className="text-center space-y-3 py-4">
+                        <p className="text-4xl">⏳</p>
+                        <p className="text-sm font-bold text-sky-200">ได้รับสลิปแล้ว — รอแอดมินตรวจสอบ</p>
+                        <p className="text-xs text-slate-400">แอดมินจะตรวจยอดเงินและเปิดสิทธิ์ {order.tierName} ให้ (โดยปกติภายใน 24 ชั่วโมง) กลับมาเปิดหน้านี้หรือรีเฟรชเพื่อดูสถานะ</p>
+                        <button onClick={onClose} className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-6 py-2.5 rounded-xl text-xs cursor-pointer">ปิด</button>
                     </div>
                 )}
 

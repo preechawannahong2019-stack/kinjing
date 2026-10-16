@@ -35,6 +35,16 @@ export interface UserProfile {
     termsAccepted: boolean;
     blocked: boolean;
     blockedReason: string | null;
+    hasPassword: boolean;
+}
+
+export interface PendingOrder {
+    id: string;
+    tier: string;
+    amount_satang: number;
+    status: 'pending' | 'review' | 'rejected';
+    fail_reason: string | null;
+    created_at: string;
 }
 
 export interface StoreStatus {

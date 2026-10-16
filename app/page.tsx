@@ -7,6 +7,7 @@ import {
     uploadMedia,
     type MediaItem,
     type Membership,
+    type PendingOrder,
     type StoreStatus,
     type TierInfo,
     type UserProfile,
@@ -17,6 +18,7 @@ import StoreDashboard from './components/StoreDashboard';
 import MarketSection from './components/MarketSection';
 import ReportModal, { type ReportTarget } from './components/ReportModal';
 import AdminModeration from './components/AdminModeration';
+import { AccountModal, LoginModal } from './components/AuthModals';
 
 // ==================== Types ====================
 interface MeResponse {
@@ -25,6 +27,7 @@ interface MeResponse {
     isAdmin: boolean;
     profile: UserProfile;
     store: StoreStatus | null;
+    pendingOrder: PendingOrder | null;
 }
 
 interface Sponsorship {
@@ -330,7 +333,10 @@ export default function Home() {
     const [profile, setProfile] = useState<UserProfile | null>(null);
     const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
     const [showStoreDashboard, setShowStoreDashboard] = useState(false);
-    const [showModeration, setShowModeration] = useState(false);
+    const [showModeration, setShowModeration] = useState(true);
+    const [showMemberLogin, setShowMemberLogin] = useState(false);
+    const [showAccount, setShowAccount] = useState(false);
+    const [pendingOrder, setPendingOrder] = useState<PendingOrder | null>(null);
     const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
     const [marketKey, setMarketKey] = useState(0);
     const [reviewsMeta, setReviewsMeta] = useState({
@@ -506,6 +512,7 @@ export default function Home() {
             setTiers(r.data.tiers);
             setProfile(r.data.profile);
             setStoreStatus(r.data.store);
+            setPendingOrder(r.data.pendingOrder ?? null);
             setIsAdmin(r.data.isAdmin);
         }
     }, []);
@@ -1422,6 +1429,21 @@ export default function Home() {
                             {membership.isVip ? 'อัปเกรดสมาชิก' : 'สมัครสมาชิก'}
                         </button>
                     )}
+                    {profile?.hasPhone || membership.isVip ? (
+                        <button
+                            onClick={() => setShowAccount(true)}
+                            className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer"
+                        >
+                            👤 บัญชีของฉัน
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => setShowMemberLogin(true)}
+                            className="bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs px-3 py-2.5 rounded-xl transition cursor-pointer"
+                        >
+                            🔑 เข้าสู่ระบบสมาชิก
+                        </button>
+                    )}
                     {!isAdmin ? (
                         <button
                             onClick={() => setShowLogin(true)}
@@ -1519,6 +1541,17 @@ export default function Home() {
                             + เขียนรีวิวใหม่
                         </button>
 
+                        <button
+                            onClick={() => {
+                                if (profile?.hasPhone || membership.isVip) setShowAccount(true);
+                                else setShowMemberLogin(true);
+                                setMobileMenuOpen(false);
+                            }}
+                            className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-3 rounded-xl text-sm cursor-pointer"
+                        >
+                            {profile?.hasPhone || membership.isVip ? '👤 บัญชีของฉัน' : '🔑 เข้าสู่ระบบสมาชิก'}
+                        </button>
+
                         <hr className="border-slate-800" />
 
                         <button
@@ -1587,7 +1620,7 @@ export default function Home() {
 
             {/* Admin Console */}
             {isAdmin && (
-                <section className="hidden md:block bg-rose-950/30 border-2 border-rose-500/50 rounded-2xl p-4 space-y-3 shadow-xl">
+                <section className="bg-rose-950/30 border-2 border-rose-500/50 rounded-2xl p-4 space-y-3 shadow-xl">
                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
                         <span className="text-xs font-black uppercase text-rose-400">
                             Admin Console
@@ -1615,7 +1648,7 @@ export default function Home() {
                                 onClick={() => setShowModeration(!showModeration)}
                                 className="bg-violet-500 hover:bg-violet-600 text-white font-bold text-xs px-3 py-2 rounded-xl cursor-pointer"
                             >
-                                {showModeration ? 'ปิด' : '🛡️ ร้านค้า/รายงาน/บล็อก'}
+                                {showModeration ? 'ปิดจัดการสมาชิก' : '👥 จัดการสมาชิก / ชำระเงิน / ร้านค้า'}
                             </button>
                             <button
                                 onClick={() => setShowLogs(!showLogs)}
@@ -3427,6 +3460,39 @@ export default function Home() {
                 store={storeStatus}
                 onChanged={refreshMe}
                 showToast={showToast}
+                pendingOrder={pendingOrder}
+                onLogin={() => {
+                    setShowVipModal(false);
+                    setShowMemberLogin(true);
+                }}
+            />
+
+            <LoginModal
+                open={showMemberLogin}
+                onClose={() => setShowMemberLogin(false)}
+                onDone={async () => {
+                    await Promise.all([refreshMe(), refreshReviews()]);
+                    showToast('เข้าสู่ระบบสมาชิกแล้ว');
+                }}
+                onRegister={() => {
+                    setShowMemberLogin(false);
+                    setShowVipModal(true);
+                }}
+            />
+
+            <AccountModal
+                open={showAccount}
+                onClose={() => setShowAccount(false)}
+                membership={membership}
+                profile={profile}
+                showToast={showToast}
+                onLoggedOut={async () => {
+                    await Promise.all([refreshMe(), refreshReviews()]);
+                }}
+                onUpgrade={() => {
+                    setShowAccount(false);
+                    setShowVipModal(true);
+                }}
             />
 
             <StoreDashboard

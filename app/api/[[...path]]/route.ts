@@ -6,7 +6,7 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool, PoolClient, QueryResultRow } from 'pg';
-import { del } from '@vercel/blob';
+import { del, put } from '@vercel/blob';
 import generatePayload from 'promptpay-qr';
 import QRCode from 'qrcode';
 
@@ -170,6 +170,10 @@ function ensureSchema(): Promise<void> {
                      created_at timestamptz NOT NULL DEFAULT now(),
                      resolved_at timestamptz
                  );
+                 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
+                 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+                 ALTER TABLE membership_orders ADD COLUMN IF NOT EXISTS slip_url text;
+                 ALTER TABLE membership_orders ADD COLUMN IF NOT EXISTS fail_reason text;
                  CREATE TABLE IF NOT EXISTS media_checks (
                      url text PRIMARY KEY,
                      ok boolean NOT NULL,
@@ -839,8 +843,10 @@ async function h_me_GET(req: NextRequest) {
             terms_accepted_at: string | null;
             blocked_at: string | null;
             blocked_reason: string | null;
+            has_password: boolean;
         }>(
-            `SELECT display_name, phone, terms_accepted_at, blocked_at, blocked_reason
+            `SELECT display_name, phone, terms_accepted_at, blocked_at, blocked_reason,
+                    (password_hash IS NOT NULL) AS has_password
              FROM users WHERE id=$1`,
             [userId]
         ),
@@ -861,8 +867,20 @@ async function h_me_GET(req: NextRequest) {
             termsAccepted: !!u?.terms_accepted_at,
             blocked: !!u?.blocked_at,
             blockedReason: u?.blocked_reason ?? null,
+            hasPassword: !!u?.has_password,
         },
         store: stores[0] ?? null,
+        pendingOrder:
+            (
+                await query(
+                    `SELECT id, tier, amount_satang, status, fail_reason, created_at
+                     FROM membership_orders
+                     WHERE user_id=$1 AND (status IN ('pending','review')
+                        OR (status='rejected' AND created_at > now() - interval '3 days'))
+                     ORDER BY created_at DESC LIMIT 1`,
+                    [userId]
+                )
+            )[0] ?? null,
     });
 }
 
@@ -900,6 +918,17 @@ async function h_membership_checkout_POST(req: NextRequest) {
             { status: 400 }
         );
     const displayName = str(body?.displayName, 50);
+    const password = typeof body?.password === 'string' ? body.password : '';
+    const pwRow = await query<{ has: boolean }>(
+        'SELECT (password_hash IS NOT NULL) AS has FROM users WHERE id=$1',
+        [uid]
+    );
+    const needPassword = !pwRow[0]?.has;
+    if (needPassword && password.length < PW_MIN)
+        return NextResponse.json(
+            { error: `กรุณาตั้งรหัสผ่านอย่างน้อย ${PW_MIN} ตัวอักษร (ใช้เข้าสู่ระบบสมาชิกจากเครื่องอื่น)` },
+            { status: 400 }
+        );
     const badName = textViolation(displayName);
     if (badName) return NextResponse.json({ error: badName }, { status: 422 });
 
@@ -912,7 +941,8 @@ async function h_membership_checkout_POST(req: NextRequest) {
             {
                 error: taken[0].blocked_at
                     ? 'เบอร์โทรนี้ถูกระงับการใช้งาน'
-                    : 'เบอร์โทรนี้ถูกใช้สมัครสมาชิกแล้ว',
+                    : 'เบอร์โทรนี้เป็นสมาชิกอยู่แล้ว — กรุณากด "เข้าสู่ระบบสมาชิก" ด้วยเบอร์และรหัสผ่าน',
+                needLogin: !taken[0].blocked_at,
             },
             { status: 409 }
         );
@@ -949,9 +979,10 @@ async function h_membership_checkout_POST(req: NextRequest) {
         await query(
             `UPDATE users SET phone=$2,
                     terms_accepted_at = COALESCE(terms_accepted_at, now()),
-                    display_name = COALESCE(NULLIF($3,''), display_name)
+                    display_name = COALESCE(NULLIF($3,''), display_name),
+                    password_hash = COALESCE(password_hash, $4)
              WHERE id=$1`,
-            [uid, phone, displayName]
+            [uid, phone, displayName, needPassword ? hashPassword(password) : null]
         );
     } catch (err) {
         if ((err as { code?: string }).code === '23505')
@@ -1017,6 +1048,8 @@ async function h_membership_verify_POST(req: NextRequest) {
     if (!order) return NextResponse.json({ error: 'ไม่พบรายการ' }, { status: 404 });
     if (order.status === 'succeeded')
         return NextResponse.json({ ok: true, status: 'succeeded' });
+    if (order.status === 'review')
+        return NextResponse.json({ ok: true, status: 'review' });
     if (order.status !== 'pending' || !isPaidTier(order.tier))
         return NextResponse.json(
             { error: 'รายการนี้หมดอายุแล้ว กรุณาเริ่มสมัครใหม่' },
@@ -1037,6 +1070,29 @@ async function h_membership_verify_POST(req: NextRequest) {
         await audit(uid, 'slip_rejected', { orderId: order.id, error }, ip);
         return NextResponse.json({ error }, { status });
     };
+
+    // 0) ยังไม่ได้ตั้งค่า SlipOK → เก็บสลิปชั่วคราวให้แอดมินตรวจเอง (ลบทิ้งเมื่ออนุมัติ/ปฏิเสธ)
+    if (!process.env.SLIPOK_BRANCH_ID || !process.env.SLIPOK_API_KEY) {
+        let slipUrl: string | null = null;
+        if (process.env.BLOB_READ_WRITE_TOKEN) {
+            try {
+                const blob = await put(`kinjing/slips/${order.id}.jpg`, slip, {
+                    access: 'public',
+                    addRandomSuffix: true,
+                    contentType: slip.type || 'image/jpeg',
+                });
+                slipUrl = blob.url;
+            } catch (err) {
+                console.error('slip upload failed', err);
+            }
+        }
+        await query(
+            `UPDATE membership_orders SET status='review', slip_url=$2 WHERE id=$1 AND status='pending'`,
+            [order.id, slipUrl]
+        );
+        await audit(uid, 'slip_submitted_for_review', { orderId: order.id }, ip);
+        return NextResponse.json({ ok: true, status: 'review' });
+    }
 
     // 1) ส่งรูปไปให้ Slip API ตรวจ (รูปสลิปไม่ถูกเก็บไว้ที่ใดเลย — ประหยัดพื้นที่)
     const v = await verifySlipWithSlipOk(slip, order.amount_satang / 100);
@@ -3101,14 +3157,33 @@ async function h_admin_users_GET(req: NextRequest) {
     const q = (req.nextUrl.searchParams.get('q') ?? '').replace(/[^\d]/g, '');
     const rows = await query(
         `SELECT u.id, u.display_name, u.phone, u.terms_accepted_at, u.blocked_at, u.blocked_reason,
-                m.tier AS membership_tier, m.activated_at
-         FROM users u LEFT JOIN memberships m ON m.user_id = u.id
-         WHERE ($1 <> '' AND u.phone LIKE '%' || $1 || '%')
-            OR ($1 = '' AND (u.blocked_at IS NOT NULL OR m.user_id IS NOT NULL))
-         ORDER BY COALESCE(u.blocked_at, m.activated_at) DESC NULLS LAST LIMIT 100`,
-        [q]
+                u.last_login_at, (u.password_hash IS NOT NULL) AS has_password,
+                COALESCE(m.tier, 'free') AS membership_tier, m.activated_at,
+                (SELECT COUNT(*)::int FROM restaurants r WHERE r.reviewer_id = u.id) AS review_count,
+                (SELECT COALESCE(SUM(amount_satang),0)::int FROM membership_orders o
+                  WHERE o.user_id = u.id AND o.status='succeeded') AS paid_satang,
+                sp.store_name, sp.status AS store_status
+         FROM users u
+         LEFT JOIN memberships m ON m.user_id = u.id
+         LEFT JOIN store_profiles sp ON sp.user_id = u.id
+         WHERE (u.phone IS NOT NULL OR m.user_id IS NOT NULL OR u.blocked_at IS NOT NULL)
+           AND ($1 = '' OR u.phone LIKE '%' || $1 || '%')
+           AND ($2 = 'all' OR COALESCE(m.tier,'free') = $2 OR ($2 = 'blocked' AND u.blocked_at IS NOT NULL))
+         ORDER BY COALESCE(m.activated_at, u.terms_accepted_at) DESC NULLS LAST LIMIT 200`,
+        [q, req.nextUrl.searchParams.get('tier') ?? 'all']
     );
-    return NextResponse.json({ users: rows });
+    const [counts] = await query<Record<string, number>>(
+        `SELECT
+            COUNT(*) FILTER (WHERE tier='member')::int AS member,
+            COUNT(*) FILTER (WHERE tier='store')::int AS store,
+            COUNT(*) FILTER (WHERE tier='store_vip')::int AS store_vip,
+            (SELECT COUNT(*)::int FROM users WHERE blocked_at IS NOT NULL) AS blocked,
+            (SELECT COUNT(*)::int FROM membership_orders WHERE status IN ('pending','review')
+               AND created_at > now() - interval '2 days') AS pending_orders,
+            (SELECT COUNT(*)::int FROM membership_orders WHERE status='review') AS review_orders
+         FROM memberships`
+    );
+    return NextResponse.json({ users: rows, counts });
 }
 
 async function h_admin_users_id_block_POST(
@@ -3167,9 +3242,10 @@ async function h_admin_membership_orders_GET(req: NextRequest) {
     const status = req.nextUrl.searchParams.get('status') ?? 'pending';
     const rows = await query(
         `SELECT o.id, o.user_id, o.tier, o.amount_satang, o.status, o.slip_ref, o.slip_sender,
-                o.verify_attempts, o.created_at, o.paid_at, u.phone
+                o.verify_attempts, o.created_at, o.paid_at, o.slip_url, o.fail_reason,
+                u.phone, u.display_name
          FROM membership_orders o JOIN users u ON u.id = o.user_id
-         WHERE ($1 = 'all' OR o.status = $1)
+         WHERE ($1 = 'all' OR o.status = $1 OR ($1 = 'pending' AND o.status = 'review'))
          ORDER BY o.created_at DESC LIMIT 100`,
         [status]
     );
@@ -3188,8 +3264,10 @@ async function h_admin_membership_orders_id_approve_POST(
     const ref = str(b?.ref, 60) || null;
     const res = await withTx(async (c) => {
         const o = await c.query(
-            `UPDATE membership_orders SET status='succeeded', paid_at=now(), slip_ref=$2
-             WHERE id=$1 AND status IN ('pending','expired') RETURNING user_id, tier`,
+            `UPDATE membership_orders SET status='succeeded', paid_at=now(),
+                    slip_ref=COALESCE($2, slip_ref)
+             WHERE id=$1 AND status IN ('pending','review','expired','rejected')
+             RETURNING user_id, tier, slip_url`,
             [id, ref]
         );
         const row = o.rows[0];
@@ -3199,6 +3277,200 @@ async function h_admin_membership_orders_id_approve_POST(
         return true;
     });
     if (!res) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    // ลบรูปสลิปทิ้งเพื่อประหยัดพื้นที่
+    const s = await query<{ slip_url: string | null }>(
+        'SELECT slip_url FROM membership_orders WHERE id=$1',
+        [id]
+    );
+    if (s[0]?.slip_url) {
+        await del(s[0].slip_url).catch(() => undefined);
+        await query('UPDATE membership_orders SET slip_url=NULL WHERE id=$1', [id]);
+    }
+    return NextResponse.json({ ok: true });
+}
+
+// ==================== MEMBER LOGIN (เบอร์โทร + รหัสผ่าน) ====================
+const PW_MIN = 6;
+
+function hashPassword(pw: string): string {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
+    return `scrypt$${salt}$${hash}`;
+}
+
+function checkPassword(pw: string, stored: string | null): boolean {
+    if (!stored) return false;
+    const [algo, salt, hash] = stored.split('$');
+    if (algo !== 'scrypt' || !salt || !hash) return false;
+    const calc = crypto.scryptSync(pw, salt, 64);
+    const want = Buffer.from(hash, 'hex');
+    return want.length === calc.length && crypto.timingSafeEqual(calc, want);
+}
+
+const loginAttempts = new Map<string, { n: number; reset: number }>();
+const SESSION_TTL = 60 * 60 * 24 * 365;
+
+async function h_auth_login_POST(req: NextRequest) {
+    const ip = ipHash(req);
+    const now = Date.now();
+    const rec = loginAttempts.get(ip);
+    if (rec && rec.reset > now && rec.n >= 8)
+        return NextResponse.json(
+            { error: 'ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอ 15 นาที' },
+            { status: 429 }
+        );
+
+    const b = await req.json().catch(() => ({}));
+    const phone = String(b?.phone ?? '').replace(/\D/g, '');
+    const password = typeof b?.password === 'string' ? b.password : '';
+
+    const rows = await query<{
+        id: string;
+        password_hash: string | null;
+        blocked_at: string | null;
+        blocked_reason: string | null;
+    }>(
+        'SELECT id, password_hash, blocked_at, blocked_reason FROM users WHERE phone=$1',
+        [phone]
+    );
+    const u = rows[0];
+    if (!u || !checkPassword(password, u.password_hash)) {
+        loginAttempts.set(
+            ip,
+            rec && rec.reset > now
+                ? { n: rec.n + 1, reset: rec.reset }
+                : { n: 1, reset: now + 15 * 60_000 }
+        );
+        await audit(u?.id ?? 'anonymous', 'member_login_failed', { phone: maskPhone(phone) }, ip);
+        return NextResponse.json(
+            { error: 'เบอร์โทรหรือรหัสผ่านไม่ถูกต้อง' },
+            { status: 401 }
+        );
+    }
+    if (u.blocked_at)
+        return NextResponse.json(
+            {
+                error: `บัญชีนี้ถูกระงับการใช้งาน${u.blocked_reason ? ` (${u.blocked_reason})` : ''}`,
+            },
+            { status: 403 }
+        );
+    loginAttempts.delete(ip);
+    await query('UPDATE users SET last_login_at=now() WHERE id=$1', [u.id]);
+    await audit(u.id, 'member_login', {}, ip);
+    const res = NextResponse.json({ ok: true });
+    setAuthCookie(res, SESSION_COOKIE, signToken({ uid: u.id }, SESSION_TTL), SESSION_TTL);
+    return res;
+}
+
+/** ออกจากระบบ → ได้บัญชีผู้ใช้ทั่วไป (guest) ใหม่ */
+async function h_auth_logout_POST() {
+    const [user] = await query<{ id: string }>('INSERT INTO users DEFAULT VALUES RETURNING id');
+    const res = NextResponse.json({ ok: true });
+    setAuthCookie(res, SESSION_COOKIE, signToken({ uid: user.id }, SESSION_TTL), SESSION_TTL);
+    return res;
+}
+
+/** ตั้ง/เปลี่ยนรหัสผ่าน (ต้องมีเบอร์โทรแล้ว) */
+async function h_me_password_POST(req: NextRequest) {
+    const uid = getUserId(req);
+    if (!uid)
+        return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+    const blocked = await blockedResponse(uid);
+    if (blocked) return blocked;
+    const b = await req.json().catch(() => ({}));
+    const newPw = typeof b?.newPassword === 'string' ? b.newPassword : '';
+    const curPw = typeof b?.currentPassword === 'string' ? b.currentPassword : '';
+    if (newPw.length < PW_MIN)
+        return NextResponse.json(
+            { error: `รหัสผ่านต้องมีอย่างน้อย ${PW_MIN} ตัวอักษร` },
+            { status: 400 }
+        );
+    const rows = await query<{ phone: string | null; password_hash: string | null }>(
+        'SELECT phone, password_hash FROM users WHERE id=$1',
+        [uid]
+    );
+    if (!rows[0]?.phone)
+        return NextResponse.json(
+            { error: 'ต้องสมัครสมาชิก (ยืนยันเบอร์โทร) ก่อนตั้งรหัสผ่าน' },
+            { status: 400 }
+        );
+    if (rows[0].password_hash && !checkPassword(curPw, rows[0].password_hash))
+        return NextResponse.json({ error: 'รหัสผ่านเดิมไม่ถูกต้อง' }, { status: 400 });
+    await query('UPDATE users SET password_hash=$2 WHERE id=$1', [uid, hashPassword(newPw)]);
+    await audit(uid, 'password_changed', {}, ipHash(req));
+    return NextResponse.json({ ok: true });
+}
+
+// ==================== ADMIN: จัดการสมาชิก ====================
+async function h_admin_users_id_tier_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    const tier = b?.tier;
+    if (tier !== 'free' && !isPaidTier(tier))
+        return NextResponse.json({ error: 'ระดับไม่ถูกต้อง' }, { status: 400 });
+    await withTx(async (c) => {
+        if (tier === 'free') {
+            await c.query('DELETE FROM memberships WHERE user_id=$1', [id]);
+            await c.query(
+                `UPDATE subscriptions SET status='canceled' WHERE user_id=$1 AND status='active'`,
+                [id]
+            ).catch(() => undefined);
+        } else {
+            await c.query(
+                `INSERT INTO memberships (user_id, tier) VALUES ($1,$2)
+                 ON CONFLICT (user_id) DO UPDATE SET tier=EXCLUDED.tier, updated_at=now()`,
+                [id, tier]
+            );
+        }
+        await auditTx(c, 'admin', 'member_tier_set', { userId: id, tier }, ipHash(req));
+    });
+    return NextResponse.json({ ok: true });
+}
+
+/** แอดมินรีเซ็ตรหัสผ่าน → คืนรหัสชั่วคราวให้แอดมินแจ้งสมาชิก */
+async function h_admin_users_id_reset_password_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const temp = crypto.randomBytes(6).toString('base64url').slice(0, 8);
+    const rows = await query(
+        'UPDATE users SET password_hash=$2 WHERE id=$1 AND phone IS NOT NULL RETURNING id',
+        [id, hashPassword(temp)]
+    );
+    if (!rows[0])
+        return NextResponse.json({ error: 'ผู้ใช้นี้ยังไม่มีเบอร์โทร' }, { status: 400 });
+    await audit('admin', 'member_password_reset', { userId: id }, ipHash(req));
+    return NextResponse.json({ ok: true, tempPassword: temp });
+}
+
+/** แอดมินปฏิเสธสลิปที่รอตรวจ */
+async function h_admin_membership_orders_id_reject_POST(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    if (!isAdminReq(req)) return forbidden();
+    const { id } = await params;
+    if (!isUuid(id)) return NextResponse.json({ error: 'bad request' }, { status: 400 });
+    const b = await req.json().catch(() => ({}));
+    const rows = await query<{ slip_url: string | null }>(
+        `UPDATE membership_orders SET status='rejected', fail_reason=$2
+         WHERE id=$1 AND status IN ('pending','review') RETURNING slip_url`,
+        [id, str(b?.note, 200) || 'สลิปไม่ถูกต้อง']
+    );
+    if (!rows[0]) return NextResponse.json({ error: 'not found' }, { status: 404 });
+    if (rows[0].slip_url) {
+        await del(rows[0].slip_url).catch(() => undefined);
+        await query('UPDATE membership_orders SET slip_url=NULL WHERE id=$1', [id]);
+    }
+    await audit('admin', 'membership_order_rejected', { orderId: id }, ipHash(req));
     return NextResponse.json({ ok: true });
 }
 
@@ -3223,6 +3495,9 @@ const ID_ROUTES: { method: string; pattern: string[]; handler: IdRoute }[] = [
     { method: 'POST', pattern: ['admin', 'users', ':id', 'unblock'], handler: h_admin_users_id_unblock_POST },
     { method: 'PATCH', pattern: ['admin', 'reviews', ':id', 'exclusive'], handler: h_admin_reviews_id_exclusive_PATCH },
     { method: 'POST', pattern: ['admin', 'membership_orders', ':id', 'approve'], handler: h_admin_membership_orders_id_approve_POST },
+    { method: 'POST', pattern: ['admin', 'membership_orders', ':id', 'reject'], handler: h_admin_membership_orders_id_reject_POST },
+    { method: 'POST', pattern: ['admin', 'users', ':id', 'tier'], handler: h_admin_users_id_tier_POST },
+    { method: 'POST', pattern: ['admin', 'users', ':id', 'reset_password'], handler: h_admin_users_id_reset_password_POST },
 ];
 
 function matchIdRoute(method: string, path: string[]) {
@@ -3247,6 +3522,9 @@ const STATIC_ROUTES: Record<string, StaticRoute> = {
     'GET me/payouts': h_me_payouts_GET as StaticRoute,
     'GET me/review_requests': h_me_review_requests_GET as StaticRoute,
     'POST membership/checkout': h_membership_checkout_POST as StaticRoute,
+    'POST auth/login': h_auth_login_POST as StaticRoute,
+    'POST auth/logout': h_auth_logout_POST as StaticRoute,
+    'POST me/password': h_me_password_POST as StaticRoute,
     'POST membership/verify': h_membership_verify_POST as StaticRoute,
     'POST moderate': h_moderate_POST as StaticRoute,
     'GET me/store': h_me_store_GET as StaticRoute,
