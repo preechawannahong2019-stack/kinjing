@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { api, baht, uploadMedia } from '../lib/client';
+import { api, baht, uploadMedia, ORDER_CHANNELS } from '../lib/client';
 import StoreProfileForm, { type StoreProfileData } from './StoreProfileForm';
 import FilePicker from './FilePicker';
 
@@ -17,6 +17,7 @@ interface Listing {
     discount_text: string | null;
     boosted: boolean;
     boosted_until: string | null;
+    order_links: Record<string, string> | null;
 }
 
 interface StoreResp {
@@ -29,7 +30,7 @@ interface StoreResp {
 const input =
     'w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500';
 
-const emptyForm = { id: '', title: '', priceBaht: '', description: '', imageUrl: '', promoPriceBaht: '', couponCode: '', discountText: '' };
+const emptyForm = { id: '', title: '', priceBaht: '', description: '', imageUrl: '', promoPriceBaht: '', couponCode: '', discountText: '', orderLinks: {} as Record<string, string> };
 
 const listingBody = (l: Listing, active: boolean) => ({
     title: l.title,
@@ -39,6 +40,7 @@ const listingBody = (l: Listing, active: boolean) => ({
     discountText: l.discount_text ?? '',
     description: l.description ?? '',
     imageUrl: l.image_url ?? '',
+    orderLinks: l.order_links ?? {},
     active,
 });
 
@@ -116,6 +118,7 @@ export default function StoreDashboard({
             promoPriceBaht: form.promoPriceBaht,
             couponCode: form.couponCode,
             discountText: form.discountText,
+            orderLinks: form.orderLinks,
             description: form.description,
             imageUrl: form.imageUrl,
         });
@@ -228,6 +231,22 @@ export default function StoreDashboard({
                                     <input className={input} placeholder="ข้อความส่วนลด เช่น ลด 10% แสดงโค้ดที่ร้าน" value={form.discountText} onChange={(e) => setForm({ ...form, discountText: e.target.value })} maxLength={80} />
                                 </div>
                                 <textarea className={input} rows={2} placeholder="รายละเอียด" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={500} />
+                                <details className="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5" open={Object.keys(form.orderLinks).length > 0}>
+                                    <summary className="text-xs font-bold text-emerald-300 cursor-pointer">🛵 ช่องทางสั่งซื้อออนไลน์ (ไม่บังคับ)</summary>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                                        {ORDER_CHANNELS.map((c) => (
+                                            <input
+                                                key={c.key}
+                                                className={input}
+                                                placeholder={`${c.label}: ${c.placeholder}`}
+                                                value={form.orderLinks[c.key] ?? ''}
+                                                onChange={(e) => setForm({ ...form, orderLinks: { ...form.orderLinks, [c.key]: e.target.value.trim() } })}
+                                                maxLength={500}
+                                            />
+                                        ))}
+                                    </div>
+                                    <p className="text-[10px] text-slate-500 mt-1">วางลิงก์ร้านจากแอปเดลิเวอรี่ (เริ่มด้วย https://) ลูกค้าจะกดสั่งได้จากหน้ารายละเอียดเมนู</p>
+                                </details>
                                 <FilePicker label={form.imageUrl ? 'เปลี่ยนรูปเมนู' : 'เพิ่มรูปเมนู'} accept="image/*" busy={uploading} onChange={onImage} />
                                 {form.imageUrl && (
                                     // eslint-disable-next-line @next/next/no-img-element
@@ -283,6 +302,7 @@ export default function StoreDashboard({
                                                     promoPriceBaht: l.promo_price_satang != null ? String(l.promo_price_satang / 100) : '',
                                                     couponCode: l.coupon_code ?? '',
                                                     discountText: l.discount_text ?? '',
+                                                    orderLinks: l.order_links ?? {},
                                                     description: l.description ?? '',
                                                     imageUrl: l.image_url ?? '',
                                                 });

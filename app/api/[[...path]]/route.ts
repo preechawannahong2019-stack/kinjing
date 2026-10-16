@@ -175,6 +175,7 @@ function ensureSchema(): Promise<void> {
                  ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS coupon_code text;
                  ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS discount_text text;
                  ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS boosted_until timestamptz;
+                 ALTER TABLE store_listings ADD COLUMN IF NOT EXISTS order_links jsonb NOT NULL DEFAULT '{}'::jsonb;
                  ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
                  ALTER TABLE membership_orders ADD COLUMN IF NOT EXISTS slip_url text;
                  ALTER TABLE membership_orders ADD COLUMN IF NOT EXISTS fail_reason text;
@@ -1247,7 +1248,14 @@ async function h_reviews_GET(req: NextRequest) {
                   ...r,
                   name: '🔒 รีวิว Exclusive',
                   must_try: 'เนื้อหานี้สำหรับสมาชิกระดับร้านค้าขึ้นไป',
-                  media_items: [],
+                  // แสดงภาพปกจริง 1 ภาพ (ล็อกเฉพาะรายละเอียดและไฟล์อื่น)
+                  media_items: (() => {
+                      const items =
+                          typeof r.media_items === 'string'
+                              ? JSON.parse(r.media_items as string)
+                              : r.media_items;
+                      return Array.isArray(items) ? items.slice(0, 1) : [];
+                  })(),
                   address: null,
                   latitude: null,
                   longitude: null,
@@ -2815,7 +2823,7 @@ async function h_me_store_GET(req: NextRequest) {
             [uid]
         ),
         query(
-            `SELECT id, title, price_satang, promo_price_satang, coupon_code, discount_text,
+            `SELECT id, title, price_satang, promo_price_satang, coupon_code, discount_text, order_links,
                     description, image_url, active, created_at, boosted_until,
                     (boosted_until IS NOT NULL AND boosted_until > now()) AS boosted
              FROM store_listings WHERE owner_id=$1 ORDER BY created_at DESC`,
@@ -2870,7 +2878,8 @@ async function h_listings_GET(req: NextRequest) {
     const uid = getUserId(req);
     const rows = await query(
         `SELECT l.id, l.title, l.price_satang, l.promo_price_satang, l.coupon_code, l.discount_text,
-                l.description, l.image_url, l.created_at,
+                l.description, l.image_url, l.created_at, l.order_links,
+                sp.contact_phone, sp.storefront_url,
                 (l.boosted_until IS NOT NULL AND l.boosted_until > now()) AS boosted,
                 sp.store_name, sp.latitude, sp.longitude, sp.address, sp.map_url,
                 ($1::uuid IS NOT NULL AND l.owner_id = $1::uuid) AS is_mine
@@ -2884,6 +2893,8 @@ async function h_listings_GET(req: NextRequest) {
     );
     return NextResponse.json({ listings: rows });
 }
+
+const ORDER_CHANNELS = ['lineman', 'grab', 'robinhood', 'shopeefood', 'line', 'website'] as const;
 
 function parseListing(b: Record<string, unknown> | null) {
     const title = str(b?.title, 120);
@@ -2901,7 +2912,14 @@ function parseListing(b: Record<string, unknown> | null) {
             : Math.round(Math.min(Math.max(promoBaht, 0), 100000) * 100);
     const couponCode = str(b?.couponCode, 40).toUpperCase().replace(/[^A-Z0-9_-]/g, '');
     const discountText = str(b?.discountText, 80);
-    return { title, description, priceSatang, imageUrl, promoPriceSatang, couponCode, discountText };
+    // ช่องทางสั่งซื้อออนไลน์ (LINE MAN / Grab / Robinhood / ShopeeFood / LINE OA / เว็บไซต์)
+    const rawLinks = (b?.orderLinks ?? {}) as Record<string, unknown>;
+    const orderLinks: Record<string, string> = {};
+    for (const k of ORDER_CHANNELS) {
+        const u = httpUrl(rawLinks[k]);
+        if (u) orderLinks[k] = u;
+    }
+    return { title, description, priceSatang, imageUrl, promoPriceSatang, couponCode, discountText, orderLinks };
 }
 
 async function storeGate(uid: string): Promise<NextResponse | { menuLimit: number }> {
@@ -2960,10 +2978,10 @@ async function h_listings_POST(req: NextRequest) {
 
     const [row] = await query<{ id: string }>(
         `INSERT INTO store_listings
-            (owner_id, title, price_satang, description, image_url, promo_price_satang, coupon_code, discount_text)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+            (owner_id, title, price_satang, description, image_url, promo_price_satang, coupon_code, discount_text, order_links)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING id`,
         [uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null,
-         l.promoPriceSatang, l.couponCode || null, l.discountText || null]
+         l.promoPriceSatang, l.couponCode || null, l.discountText || null, JSON.stringify(l.orderLinks)]
     );
     await audit(uid, 'listing_created', { listingId: row.id }, ipHash(req));
     return NextResponse.json({ ok: true, id: row.id });
@@ -3012,10 +3030,10 @@ async function h_listings_id_PATCH(
     await query(
         `UPDATE store_listings SET title=$3, price_satang=$4, description=$5,
                 image_url=$6, active=$7, promo_price_satang=$8, coupon_code=$9,
-                discount_text=$10, updated_at=now()
+                discount_text=$10, order_links=$11::jsonb, updated_at=now()
          WHERE id=$1 AND owner_id=$2`,
         [id, uid, l.title, l.priceSatang, l.description || null, l.imageUrl || null, active,
-         l.promoPriceSatang, l.couponCode || null, l.discountText || null]
+         l.promoPriceSatang, l.couponCode || null, l.discountText || null, JSON.stringify(l.orderLinks)]
     );
     return NextResponse.json({ ok: true });
 }

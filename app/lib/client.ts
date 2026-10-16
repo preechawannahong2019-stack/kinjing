@@ -181,3 +181,13 @@ export async function uploadMedia(
     if (!mod.ok) throw new Error(mod.data?.error ?? 'ตรวจสอบไฟล์ไม่สำเร็จ กรุณาลองใหม่');
     return item;
 }
+
+// ==================== Online ordering channels ====================
+export const ORDER_CHANNELS: { key: string; label: string; cls: string; placeholder: string }[] = [
+    { key: 'lineman', label: 'LINE MAN', cls: 'bg-[#00b14f] text-white', placeholder: 'ลิงก์ร้านใน LINE MAN Wongnai' },
+    { key: 'grab', label: 'GrabFood', cls: 'bg-[#00b14f] text-white', placeholder: 'ลิงก์ร้านใน GrabFood' },
+    { key: 'robinhood', label: 'Robinhood', cls: 'bg-[#6c2bd9] text-white', placeholder: 'ลิงก์ร้านใน Robinhood' },
+    { key: 'shopeefood', label: 'ShopeeFood', cls: 'bg-[#ee4d2d] text-white', placeholder: 'ลิงก์ร้านใน ShopeeFood' },
+    { key: 'line', label: 'LINE ร้าน', cls: 'bg-[#06c755] text-white', placeholder: 'ลิงก์ LINE OA เช่น https://lin.ee/...' },
+    { key: 'website', label: 'เว็บไซต์ร้าน', cls: 'bg-sky-600 text-white', placeholder: 'เว็บไซต์ / Facebook เพจ' },
+];
