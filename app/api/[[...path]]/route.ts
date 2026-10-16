@@ -1260,7 +1260,7 @@ async function h_reviews_GET(req: NextRequest) {
                   latitude: null,
                   longitude: null,
                   recommender_name: null,
-                  promotions: [],
+                  // คูปอง/โปรโมชันของร้านแสดงให้ผู้ใช้ทุกคนเห็น (ไม่ล็อก)
                   exclusive_locked: true,
               }
             : r
