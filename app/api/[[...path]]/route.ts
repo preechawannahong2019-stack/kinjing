@@ -2811,11 +2811,44 @@ async function h_me_store_GET(req: NextRequest) {
             [uid]
         ),
     ]);
+    const [myReviews, [stats]] = await Promise.all([
+        query(
+            `SELECT r.id, r.name, r.category, r.view_count, r.rating, r.created_at, r.boosted_until,
+                    (r.boosted_until IS NOT NULL AND r.boosted_until > now()) AS boosted,
+                    (SELECT COUNT(*)::int FROM promotions p
+                      WHERE p.restaurant_id = r.id AND now() BETWEEN p.starts_at AND p.ends_at) AS active_promos
+             FROM restaurants r WHERE r.reviewer_id=$1
+             ORDER BY r.created_at DESC LIMIT 50`,
+            [uid]
+        ),
+        query<{ active_boosts: number; free_meal_month: number; active_promos: number }>(
+            `SELECT
+                (SELECT COUNT(*)::int FROM restaurants
+                  WHERE reviewer_id=$1 AND boosted_until > now()) AS active_boosts,
+                (SELECT COUNT(*)::int FROM promotions
+                  WHERE owner_id=$1 AND kind='free_meal'
+                    AND date_trunc('month', created_at AT TIME ZONE 'Asia/Bangkok')
+                      = date_trunc('month', now() AT TIME ZONE 'Asia/Bangkok')) AS free_meal_month,
+                (SELECT COUNT(*)::int FROM promotions
+                  WHERE owner_id=$1 AND now() BETWEEN starts_at AND ends_at) AS active_promos`,
+            [uid]
+        ),
+    ]);
     return NextResponse.json({
         profile: profiles[0] ?? null,
         listings,
         menuLimit: m.menuLimit,
         isStore: m.isStore,
+        tierName: m.tierName,
+        myReviews,
+        stats: {
+            activeBoosts: stats.active_boosts,
+            maxBoosts: MAX_ACTIVE_BOOSTS,
+            boostDays: BOOST_DAYS,
+            freeMealThisMonth: stats.free_meal_month,
+            freeMealLimit: 1,
+            activePromos: stats.active_promos,
+        },
     });
 }
 

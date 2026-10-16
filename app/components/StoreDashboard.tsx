@@ -38,7 +38,11 @@ export default function StoreDashboard({
     showToast,
     onChanged,
     onUpgrade,
+    inline = false,
+    refreshKey = 0,
 }: {
+    inline?: boolean;
+    refreshKey?: number;
     open: boolean;
     onClose: () => void;
     showToast: (m: string) => void;
@@ -63,7 +67,7 @@ export default function StoreDashboard({
             setShowForm(false);
             setEditProfile(false);
         }
-    }, [open, load]);
+    }, [open, load, refreshKey]);
 
     if (!open) return null;
 
@@ -133,18 +137,18 @@ export default function StoreDashboard({
     };
 
     return (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4" onClick={onClose}>
-            <div className="bg-slate-900 border border-amber-500/40 rounded-2xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[92vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className={inline ? '' : 'fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4'} onClick={inline ? undefined : onClose}>
+            <div className={inline ? 'bg-slate-950/40 border border-slate-800 rounded-2xl p-4 space-y-4' : 'bg-slate-900 border border-amber-500/40 rounded-2xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[92vh] overflow-y-auto'} onClick={(e) => e.stopPropagation()}>
                 <div className="flex justify-between items-start">
                     <div>
-                        <h3 className="text-base font-bold text-white">🏪 ร้านค้าของฉัน</h3>
+                        <h3 className="text-base font-bold text-white">{inline ? '🛒 สินค้า/เมนูขาย ของร้าน' : '🏪 ร้านค้าของฉัน'}</h3>
                         {data?.profile && (
                             <p className="text-xs text-slate-400 mt-0.5">
                                 {data.profile.store_name} • {STATUS[data.profile.status ?? 'pending']}
                             </p>
                         )}
                     </div>
-                    <button onClick={onClose} className="text-slate-400 hover:text-white cursor-pointer text-lg p-1">✕</button>
+                    {!inline && <button onClick={onClose} className="text-slate-400 hover:text-white cursor-pointer text-lg p-1">✕</button>}
                 </div>
 
                 {!data ? (

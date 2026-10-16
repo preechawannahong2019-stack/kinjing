@@ -18,6 +18,7 @@ import StoreDashboard from './components/StoreDashboard';
 import MarketSection from './components/MarketSection';
 import ReportModal, { type ReportTarget } from './components/ReportModal';
 import AdminModeration from './components/AdminModeration';
+import StoreToolsPanel from './components/StoreToolsPanel';
 import { AccountModal, LoginModal } from './components/AuthModals';
 
 // ==================== Types ====================
@@ -339,6 +340,7 @@ export default function Home() {
     const [pendingOrder, setPendingOrder] = useState<PendingOrder | null>(null);
     const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
     const [marketKey, setMarketKey] = useState(0);
+    const [storeToolsKey, setStoreToolsKey] = useState(0);
     const [reviewsMeta, setReviewsMeta] = useState({
         limited: false,
         total: 0,
@@ -978,6 +980,7 @@ export default function Home() {
             return;
         }
         showToast('บูสต์การมองเห็น 7 วันแล้ว');
+        setStoreToolsKey((k) => k + 1);
         await refreshReviews();
     };
 
@@ -993,6 +996,7 @@ export default function Home() {
             return;
         }
         showToast('สร้างโปรโมชัน/คูปองแล้ว');
+        setStoreToolsKey((k) => k + 1);
         setPromoFor(null);
         setPromoForm({ title: '', description: '', couponCode: '', discountText: '', days: '7', kind: 'discount', quota: '10' });
         await refreshReviews();
@@ -1242,7 +1246,8 @@ export default function Home() {
         setNewAddress('');
         setNewLatitude(null);
         setNewLongitude(null);
-        setShowAddForm(false);
+        setStoreToolsKey((k) => k + 1);
+        if (!membership.isStore) setShowAddForm(false);
         await refreshReviews();
     };
 
@@ -2492,7 +2497,7 @@ export default function Home() {
                         onClick={() => setShowAddForm(!showAddForm)}
                         className="inline-flex items-center justify-center gap-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold px-4 py-2 rounded-xl shadow-lg transition cursor-pointer text-xs shrink-0"
                     >
-                        {showAddForm ? 'X ปิดฟอร์ม' : '+ เขียนรีวิว'}
+                        {showAddForm ? 'X ปิดฟอร์ม' : membership.isStore ? '+ เขียนรีวิว / เครื่องมือร้าน' : '+ เขียนรีวิว'}
                     </button>
                 </div>
             </div>
@@ -2673,6 +2678,21 @@ export default function Home() {
                 </form>
             )}
 
+            {/* โหมดเขียนรีวิว: แสดงเฉพาะฟอร์ม + เครื่องมือร้านค้า (ไม่แสดงรีวิวของคนอื่น) */}
+            {showAddForm && (
+                <StoreToolsPanel
+                    membership={membership}
+                    refreshKey={storeToolsKey}
+                    showToast={showToast}
+                    onBoost={async (r) => boostReview(r as Review)}
+                    onPromo={(r) => setPromoFor(r as Review)}
+                    onUpgrade={() => setShowVipModal(true)}
+                    onChanged={() => setMarketKey((k) => k + 1)}
+                />
+            )}
+
+            {!showAddForm && (
+                <>
             <MarketSection
                 refreshKey={marketKey}
                 isAdmin={isAdmin}
@@ -3035,6 +3055,8 @@ export default function Home() {
                         สมัครสมาชิก 99 บาท
                     </button>
                 </div>
+            )}
+                </>
             )}
 
             {/* Admin Login Modal */}
