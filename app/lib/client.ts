@@ -191,3 +191,10 @@ export const ORDER_CHANNELS: { key: string; label: string; cls: string; placehol
     { key: 'line', label: 'LINE ร้าน', cls: 'bg-[#06c755] text-white', placeholder: 'ลิงก์ LINE OA เช่น https://lin.ee/...' },
     { key: 'website', label: 'เว็บไซต์ร้าน', cls: 'bg-sky-600 text-white', placeholder: 'เว็บไซต์ / Facebook เพจ' },
 ];
+
+// ==================== Service modes ====================
+export const SERVICE_MODES: { key: 'dine_in' | 'takeaway' | 'delivery'; label: string; icon: string; cls: string }[] = [
+    { key: 'dine_in', label: 'ทานที่ร้าน', icon: '🍽️', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/40' },
+    { key: 'takeaway', label: 'สั่งกลับบ้าน', icon: '🥡', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/40' },
+    { key: 'delivery', label: 'เดลิเวอรี่', icon: '🛵', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' },
+];

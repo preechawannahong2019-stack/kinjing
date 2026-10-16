@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { api, baht, uploadMedia, ORDER_CHANNELS } from '../lib/client';
+import { api, baht, uploadMedia, ORDER_CHANNELS, SERVICE_MODES } from '../lib/client';
 import StoreProfileForm, { type StoreProfileData } from './StoreProfileForm';
 import FilePicker from './FilePicker';
 
@@ -18,6 +18,7 @@ interface Listing {
     boosted: boolean;
     boosted_until: string | null;
     order_links: Record<string, string> | null;
+    service_modes: string[] | null;
 }
 
 interface StoreResp {
@@ -30,7 +31,7 @@ interface StoreResp {
 const input =
     'w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500';
 
-const emptyForm = { id: '', title: '', priceBaht: '', description: '', imageUrl: '', promoPriceBaht: '', couponCode: '', discountText: '', orderLinks: {} as Record<string, string> };
+const emptyForm = { id: '', title: '', priceBaht: '', description: '', imageUrl: '', promoPriceBaht: '', couponCode: '', discountText: '', orderLinks: {} as Record<string, string>, serviceModes: ['dine_in'] as string[] };
 
 const listingBody = (l: Listing, active: boolean) => ({
     title: l.title,
@@ -41,6 +42,7 @@ const listingBody = (l: Listing, active: boolean) => ({
     description: l.description ?? '',
     imageUrl: l.image_url ?? '',
     orderLinks: l.order_links ?? {},
+    serviceModes: l.service_modes ?? [],
     active,
 });
 
@@ -119,6 +121,7 @@ export default function StoreDashboard({
             couponCode: form.couponCode,
             discountText: form.discountText,
             orderLinks: form.orderLinks,
+            serviceModes: form.serviceModes,
             description: form.description,
             imageUrl: form.imageUrl,
         });
@@ -231,6 +234,31 @@ export default function StoreDashboard({
                                     <input className={input} placeholder="ข้อความส่วนลด เช่น ลด 10% แสดงโค้ดที่ร้าน" value={form.discountText} onChange={(e) => setForm({ ...form, discountText: e.target.value })} maxLength={80} />
                                 </div>
                                 <textarea className={input} rows={2} placeholder="รายละเอียด" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={500} />
+                                <div>
+                                    <p className="text-xs font-bold text-white mb-1.5">รูปแบบบริการของเมนูนี้</p>
+                                    <div className="flex flex-wrap gap-2">
+                                        {SERVICE_MODES.map((m) => {
+                                            const on = form.serviceModes.includes(m.key);
+                                            return (
+                                                <button
+                                                    type="button"
+                                                    key={m.key}
+                                                    onClick={() =>
+                                                        setForm({
+                                                            ...form,
+                                                            serviceModes: on ? form.serviceModes.filter((x) => x !== m.key) : [...form.serviceModes, m.key],
+                                                        })
+                                                    }
+                                                    className={`text-xs font-bold px-3 py-2 rounded-xl border cursor-pointer ${on ? m.cls : 'bg-slate-800 text-slate-500 border-slate-700'}`}
+                                                >
+                                                    {on ? '✓ ' : ''}
+                                                    {m.icon} {m.label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                    <p className="text-[10px] text-slate-500 mt-1">ใส่ลิงก์สั่งออนไลน์ด้านล่าง ระบบจะติ๊ก “เดลิเวอรี่” ให้อัตโนมัติ</p>
+                                </div>
                                 <details className="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5" open={Object.keys(form.orderLinks).length > 0}>
                                     <summary className="text-xs font-bold text-emerald-300 cursor-pointer">🛵 ช่องทางสั่งซื้อออนไลน์ (ไม่บังคับ)</summary>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
@@ -303,6 +331,7 @@ export default function StoreDashboard({
                                                     couponCode: l.coupon_code ?? '',
                                                     discountText: l.discount_text ?? '',
                                                     orderLinks: l.order_links ?? {},
+                                                    serviceModes: l.service_modes ?? [],
                                                     description: l.description ?? '',
                                                     imageUrl: l.image_url ?? '',
                                                 });

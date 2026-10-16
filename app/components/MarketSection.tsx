@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { api, baht, ORDER_CHANNELS } from '../lib/client';
+import { api, baht, ORDER_CHANNELS, SERVICE_MODES } from '../lib/client';
 
 interface PublicListing {
     id: string;
@@ -22,6 +22,21 @@ interface PublicListing {
     coupon_code: string | null;
     discount_text: string | null;
     order_links: Record<string, string> | null;
+    service_modes: string[] | null;
+}
+
+function ServiceBadges({ modes, big }: { modes: string[] | null; big?: boolean }) {
+    const list = SERVICE_MODES.filter((m) => modes?.includes(m.key));
+    if (list.length === 0) return null;
+    return (
+        <div className="flex flex-wrap gap-1">
+            {list.map((m) => (
+                <span key={m.key} className={`${big ? 'text-xs px-2.5 py-1' : 'text-[9px] px-1.5 py-0.5'} font-bold rounded-full border ${m.cls}`}>
+                    {m.icon} {m.label}
+                </span>
+            ))}
+        </div>
+    );
 }
 
 const mapOf = (l: PublicListing) =>
@@ -56,6 +71,7 @@ export default function MarketSection({
 }) {
     const [items, setItems] = useState<PublicListing[]>([]);
     const [sel, setSel] = useState<PublicListing | null>(null);
+    const [mode, setMode] = useState<string>('all');
 
     const load = useCallback(async () => {
         const r = await api<{ listings: PublicListing[] }>('/api/listings');
@@ -94,13 +110,32 @@ export default function MarketSection({
         showToast(`คัดลอกโค้ด ${code} แล้ว — แสดงที่ร้าน/ใส่ในแอปเพื่อรับส่วนลด`);
     };
 
+    const shown = mode === 'all' ? items : items.filter((l) => l.service_modes?.includes(mode));
     const groups: [string, PublicListing[]][] = [
-        ['⭐ เมนูเด็ดแนะนำ', items.filter((l) => l.boosted)],
-        ['🛒 เมนูขายจากร้านค้าที่ยืนยันแล้ว', items.filter((l) => !l.boosted)],
+        ['⭐ เมนูเด็ดแนะนำ', shown.filter((l) => l.boosted)],
+        ['🛒 เมนูขายจากร้านค้าที่ยืนยันแล้ว', shown.filter((l) => !l.boosted)],
     ];
 
     return (
         <section className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+            <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-slate-400 mr-1">รูปแบบบริการ:</span>
+                {[{ key: 'all', label: 'ทั้งหมด', icon: '🍴' }, ...SERVICE_MODES].map((m) => {
+                    const n = m.key === 'all' ? items.length : items.filter((l) => l.service_modes?.includes(m.key)).length;
+                    return (
+                        <button
+                            key={m.key}
+                            onClick={() => setMode(m.key)}
+                            className={`text-xs font-bold px-3 py-1.5 rounded-lg cursor-pointer transition ${
+                                mode === m.key ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                            }`}
+                        >
+                            {m.icon} {m.label} <span className="opacity-70">({n})</span>
+                        </button>
+                    );
+                })}
+            </div>
+            {shown.length === 0 && <p className="text-xs text-slate-500">ยังไม่มีเมนูที่รองรับรูปแบบบริการนี้</p>}
             {groups.map(([title, group]) =>
                 group.length === 0 ? null : (
                     <div key={title} className="space-y-2">
@@ -130,6 +165,7 @@ export default function MarketSection({
                                         <p className="text-xs font-bold text-white line-clamp-1">{l.title}</p>
                                         <Price l={l} />
                                         <p className="text-[10px] text-slate-400 line-clamp-1">✅ {l.store_name}</p>
+                                        <ServiceBadges modes={l.service_modes} />
                                         {(l.coupon_code || l.discount_text) && (
                                             <p className="text-[10px] font-bold text-emerald-300 line-clamp-1">🏷️ {l.discount_text || `โค้ด ${l.coupon_code}`}</p>
                                         )}
@@ -173,6 +209,7 @@ export default function MarketSection({
                                 </button>
                             </div>
                             <Price l={sel} big />
+                            <ServiceBadges modes={sel.service_modes} big />
                             {sel.description && <p className="text-sm text-slate-300 whitespace-pre-line">{sel.description}</p>}
 
                             {(sel.coupon_code || sel.discount_text) && (
